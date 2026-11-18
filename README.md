@@ -1,0 +1,95 @@
+# X-Bow Control
+
+Treino de X-Bow 3.0 e IceBow com partidas vencedoras do IL_Replay e self-play no RoyaleSim. Os dois decks têm checkpoints próprios.
+
+## Painel de treino e Modo Batalha
+
+No PowerShell, abra a pasta do projeto e execute:
+
+```powershell
+.\.venv\Scripts\python.exe xbow_dashboard.py --open
+```
+
+### 🎮 Jogar contra a IA
+
+Acesse a seção **Jogar contra a IA** diretamente no painel web (ou em `http://127.0.0.1:8766/#jogar`):
+- **Escolha seu deck**: Corredor 2.6, Gigante Real, X-Bow 3.0 ou IceBow.
+- **Escolha o oponente (IA)**: selecione qualquer checkpoint treinado (PPO ou Imitação BC de qualquer experimento salvo em `runs/`) ou bots de regras programados.
+- **Ajuste a velocidade**: de 0.5× (modo tático com mais tempo para reagir) a 1.0× (tempo real) ou 1.5×.
+- **Controles de batalha**:
+  - Selecione uma carta na sua mão clicando nela ou usando as teclas `[1]`, `[2]`, `[3]`, `[4]`.
+  - O tabuleiro destaca a área válida para posicionamento. Mova o mouse sobre a arena e clique no tile desejado para posicionar a carta.
+  - A barra de elixir carrega em tempo real e exibe a próxima carta do seu ciclo.
+  - Pressione `Espaço` para pausar/retomar e `Esc` para cancelar a seleção de carta.
+  - Efeitos sonoros sintetizados pelo navegador e feedback tático em tempo real.
+
+No [painel local](http://127.0.0.1:8766/), escolha X-Bow 3.0 ou IceBow. Em **Treinamento assistido**, escolha **Novo treino** ou selecione um experimento com checkpoints para **Retomar self-play**. Ajuste a duração e clique no botão de início. A tela acompanha a reconstrução dos replays, as épocas de imitação, as partidas de self-play e a avaliação, além de mostrar os registros e as métricas conforme são gravados.
+
+O máximo do slider **Replays** acompanha a quantidade de candidatos do deck selecionado nas partições Parquet locais. O portal recalcula esse máximo quando as partições mudam. O simulador pode descartar replays durante a reconstrução.
+
+**Parar treino** solicita a parada no próximo ponto seguro. Os checkpoints já gravados ficam disponíveis. Fechar a página não encerra o treino, que pode ser acompanhado ao reabrir o painel.
+
+Em **Arena do treino**, veja o estado do tabuleiro, as mãos, o elixir e as jogadas registrados pelo simulador. **Imitação** compara a jogada humana com a decisão do modelo no mesmo quadro e mostra como a previsão muda ao longo dos lotes. **Self-play** e **Avaliação** mostram as partidas jogadas pelo modelo. Pause, avance pela gravação ou selecione um dos três registros mais recentes de cada etapa. Os exemplos com a indicação **Demonstração com dados locais** usam replays do dataset e checkpoints já salvos.
+
+## Preparação no Windows
+
+```powershell
+python -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Coloque as [partições de replays](https://huggingface.co/datasets/VanguardX101/IL_Replay/tree/main/replays) em `replays/`. O parâmetro `--parquet-path` também aceita uma partição individual ou a pasta que contém `replays/`.
+
+O importador `xbow_import_cochon.py` lê o snapshot publicado do [Cochon123](https://huggingface.co/datasets/Cochon123/clash-royale-replays) e salva em `replays/part-cochon-2026-11-01.parquet` as partidas vencedoras dos decks exatos que foram reconstruídas pelo simulador. Ele verifica a sequência de ações, remove partidas duplicadas e usa nível 11 quando o registro não informa os níveis.
+
+Em **Vídeos do Royale TV**, o portal usa o índice local do [AlphaClash](https://huggingface.co/datasets/josefbednar/alphaclash-replays). O player carrega a gravação escolhida diretamente da fonte. As gravações do catálogo são de outra coleção e não compartilham identificadores com o IL_Replay.
+
+## Imitação
+
+```powershell
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --deck xbow_30 --parquet-path replays --scan
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --deck xbow_30 --parquet-path replays --matches 48 --epochs 3 --output runs/novo/xbow_30
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --deck icebow --parquet-path replays --matches 36 --epochs 3 --output runs/novo/icebow
+```
+
+O leitor identifica o vencedor a partir do resultado da partida e compara as oito cartas-base com o deck escolhido. O RoyaleSim reconstitui o tabuleiro a partir dos eventos gravados. A ordem inicial da mão é inferida pela sequência de cartas jogadas. O programa informa replays recusados por divergência de simulação, carta indisponível ou habilidade ambígua.
+
+O treino aplica a reamostragem da equação 8 do [KataCR](https://arxiv.org/html/2504.04783v1) aos quadros de decisão. A divisão por partida usa o identificador do replay. As frequências de posicionamento por carta são estimadas só nas partidas de treino. O menor NLL de validação seleciona `bc.pt`, que também guarda a lista de partidas de cada conjunto. As métricas de carta e casa são condicionais aos quadros em que a pessoa jogou uma carta.
+
+A perda de jogar ou esperar corrige a probabilidade de inclusão dos quadros reamostrados. A seleção da carta e da casa continua aprendendo dos quadros com jogadas reamostrados. Para ampliar o treino com a mesma validação, passe `--matches 120 --disk-frames --holdout-checkpoint runs/tactical/xbow_30/bc.pt` e escolha uma pasta nova de saída. `--disk-frames` mantém os quadros temporariamente no disco durante o treino.
+
+## Self-play e avaliação
+
+```powershell
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --deck xbow_30 --bc-checkpoint runs/novo/xbow_30/bc.pt --output runs/novo/xbow_30 --ppo-updates 4 --rollout-games 6 --kl-coef 0.25 --evaluate 6
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --deck xbow_30 --bc-checkpoint runs/novo/xbow_30/bc.pt --output runs/novo/xbow_30 --resume-ppo --ppo-updates 4 --rollout-games 6 --kl-coef 0.25
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --deck xbow_30 --bc-checkpoint runs/novo/xbow_30/bc.pt --output runs/novo/xbow_30 --evaluate-checkpoint runs/novo/xbow_30/ppo.pt --evaluate 12
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --deck xbow_30 --parquet-path replays --bc-checkpoint runs/novo/xbow_30/bc.pt --output runs/novo/xbow_30 --evaluate-checkpoint runs/novo/xbow_30/ppo.pt --replay-eval
+```
+
+Para IceBow, use `--deck icebow` e seus caminhos correspondentes. A liga usa checkpoints anteriores, um bot de X-Bow programado e rivais de Corredor e Gigante Real. O PPO penaliza a divergência KL exata do checkpoint congelado de imitação para a política em treino sobre as ações legais. O RoyaleSim fornece o resultado e o dano às torres, enquanto os termos adicionais recompensam aquisições de alvo pela X-Bow e trocas de elixir.
+
+`selfplay.json` guarda as métricas do treino e da avaliação solicitada. `evaluation.json` guarda avaliações executadas sem treino. Para comparar BC e PPO, o programa usa os mesmos rivais, sementes e lados. `replay_validation.json` compara a imitação antes e depois do PPO nas partidas reservadas e mede a escolha da carta e o posicionamento de X-Bow, Tesla e cartas de um elixir.
+
+## Inferência local
+
+```powershell
+.\.venv\Scripts\python.exe xbow_policy_service.py --deck xbow_30 --checkpoint runs/tactical/xbow_30/ppo.pt
+```
+
+O processo lê um objeto JSON por linha com `spatial`, `vector` e `action_mask` no formato de `xbow_environment.battle_env()`. Ele retorna a ação e, quando aplicável, a posição na mão, a casa da arena ou o botão de habilidade.
+
+### Entrada de um leitor de tela
+
+`--public-frames` recebe quadros cronológicos com mão e elixir próprios, torres, unidades visíveis, feitiços e jogadas confirmadas. O primeiro quadro da partida usa tick 0. Cada segundo corresponde a 20 ticks. Cada quadro carrega eventos novos entre seu antecessor e o tick atual, com limite superior exclusivo. As coordenadas têm origem no canto inferior esquerdo da arena do observador, em tiles. A vida das torres vem na ordem rei, esquerda e direita de cada jogador. O formato está definido em `Frame` no módulo `xbow_public_feed.py`.
+
+O adaptador abaixo lê o endpoint `/api/frames` de uma sessão de captura do cr-bot. Inicie a sessão antes da abertura. O relógio usa o tempo de captura e a vida máxima das torres usa os valores padrão do treino, que podem ser corrigidos por `--own-max` e `--opponent-max`. As sugestões usam os encaixes calculados a partir do tabuleiro público e excluem jogadas que dependem de realocação. O processo retorna sugestões em JSON. [API de quadros do cr-bot](https://github.com/Keschler/cr-bot/blob/main/src/frontend/api/frames.py)
+
+```powershell
+.\.venv\Scripts\python.exe -u xbow_capture_bridge.py --deck xbow_30 --capture-url http://127.0.0.1:8000 |
+    .\.venv\Scripts\python.exe -u xbow_policy_service.py --deck xbow_30 --checkpoint runs/calibrated/xbow_30/bc.pt --public-frames
+```
+
+O adaptador também lê exportações cronológicas de quadros em JSONL pela entrada padrão. O rastreador descarta os campos de elixir estimado e cartas vistas fornecidos pelo leitor e refaz a estimativa com os eventos confirmados. A vida de unidades sem barra legível usa o valor base da carta no simulador.
+
+O simulador fornece as jogadas públicas aceitas. O rastreador estima o elixir e a fila do rival com essas jogadas e o relógio de partida. Para verificar o contrato de observação e a recompensa de aquisição de alvo, execute `python -m unittest -v test_xbow_pipeline` no ambiente do projeto.

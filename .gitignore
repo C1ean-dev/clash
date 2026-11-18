@@ -1,0 +1,7 @@
+.venv/
+.pip-cache/
+__pycache__/
+replays/
+runs/
+il_replay_sample.json
+.codex/

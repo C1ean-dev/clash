@@ -1,0 +1,8 @@
+numpy>=2.0
+msgspec>=0.19
+pyarrow>=18
+torch>=2.9
+royalegym[sim]==0.1.30
+royalesim==0.1.53
+royaleimitate==0.2.17
+royalelearn==0.5.26
