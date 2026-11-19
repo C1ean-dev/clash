@@ -21,6 +21,9 @@ from xbow_metrics import check_training_stop
 from xbow_replays import reconstruct, winning_replays
 
 
+PPO_REFERENCE_CACHE_BYTES = 128 * 1024**2
+
+
 class XBowPolicy(nn.Module):
     def __init__(self, spatial_channels: int, vector_size: int, actions: int, architecture=2,
                  placement_prior=None, hand_start=0):
@@ -50,6 +53,10 @@ class XBowPolicy(nn.Module):
             self.register_buffer("coordinates", torch.stack((x, y)), persistent=False)
 
     def forward(self, spatial, vector, mask):
+        logits, value = self.logits_and_value(spatial, vector, mask)
+        return Categorical(logits=logits, validate_args=False), value
+
+    def logits_and_value(self, spatial, vector, mask):
         if self.architecture == 2:
             spatial = torch.cat((spatial, self.coordinates.expand(len(spatial), -1, -1, -1)), 1)
         board = self.board(spatial)
@@ -73,7 +80,7 @@ class XBowPolicy(nn.Module):
         plays = torch.cat((tiles.flatten(1), special[:, 1:]), dim=1)
         plays = plays.masked_fill(~mask[:, 1:], -1e9).log_softmax(dim=1)
         logits = torch.cat((special[:, :1], plays), dim=1)
-        return Categorical(logits=logits.masked_fill(~mask, -1e9)), self.value(context).squeeze(-1)
+        return logits.masked_fill(~mask, -1e9), self.value(context).squeeze(-1)
 
     @classmethod
     def from_observation(cls, obs, placement_prior=None, hand_start=0):
@@ -97,26 +104,34 @@ class XBowPolicy(nn.Module):
         return int(action.item()), float(distribution.log_prob(action).item()), float(value.item())
 
 
+def checkpoint_data(policy, deck, phase, metrics, trainer=None):
+    return {
+        "version": 1, "deck": deck, "phase": phase, "spec": policy.spec,
+        "architecture": policy.architecture, "policy": policy.state_dict(), "metrics": metrics,
+        "hand_start": policy.hand_start, "trainer": trainer,
+    }
+
+
 def save_checkpoint(path, policy, deck, phase, metrics, trainer=None):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     with NamedTemporaryFile(dir=path.parent, suffix=".pt", delete=False) as temporary:
         local = Path(temporary.name)
     try:
-        torch.save({
-            "version": 1, "deck": deck, "phase": phase, "spec": policy.spec,
-            "architecture": policy.architecture, "policy": policy.state_dict(), "metrics": metrics,
-            "hand_start": policy.hand_start, "trainer": trainer,
-        }, local)
+        torch.save(checkpoint_data(policy, deck, phase, metrics, trainer), local)
         os.replace(local, path)
     finally:
         local.unlink(missing_ok=True)
 
 
-def load_checkpoint(path, deck, device):
+def load_checkpoint(path, deck, device, *, memory_format=torch.preserve_format):
     saved = torch.load(path, map_location=device, weights_only=True)
+    return policy_from_checkpoint(saved, deck, device, memory_format=memory_format), saved
+
+
+def policy_from_checkpoint(saved, deck, device, *, memory_format=torch.preserve_format):
     if saved.get("version") != 1 or saved.get("deck") != deck:
-        raise ValueError(f"Checkpoint incompativel com {deck}: {path}")
+        raise ValueError(f"Checkpoint incompativel com {deck}")
     architecture = saved.get("architecture", 1)
     if architecture not in (1, 2):
         raise ValueError(f"Arquitetura desconhecida no checkpoint: {architecture}")
@@ -124,9 +139,9 @@ def load_checkpoint(path, deck, device):
         *saved["spec"], architecture=architecture,
         placement_prior=saved["policy"].get("placement_prior"),
         hand_start=saved.get("hand_start", 0),
-    ).to(device)
+    ).to(device=device, memory_format=memory_format)
     policy.load_state_dict(saved["policy"])
-    return policy.eval(), saved
+    return policy.eval()
 
 
 def kata_weights(labels: np.ndarray, action_rate: float) -> np.ndarray:
@@ -566,29 +581,43 @@ def optimize_ppo(policy, reference, optimizer, data, batch_size, updates, kl_coe
     """Clipped PPO with the exact masked D_KL(BC || PPO) over joint actions."""
     spatial, vector, mask, actions, old_logp, advantage, returns = data
     advantage = (advantage - advantage.mean()) / advantage.std(unbiased=False).clamp_min(1e-8)
+    # The BC reference is frozen. Reuse its predictions for subsequent passes
+    # when the CPU rollout fits the cache budget.
+    reference_logits = None
+    if (reference is not None and actions.device.type == "cpu" and updates > 1
+            and mask.numel() * 4 <= PPO_REFERENCE_CACHE_BYTES):
+        reference_logits = torch.empty(mask.shape, dtype=torch.float32, device=actions.device)
     divergences = []
-    for _ in range(updates):
+    for epoch in range(updates):
         order = torch.randperm(len(actions), device=actions.device)
         for ids in order.split(batch_size):
             inputs = (spatial[ids].float(), vector[ids].float(), mask[ids])
             dist, value = policy(*inputs)
-            with torch.no_grad():
-                prior, _ = reference(*inputs)
             ratio = (dist.log_prob(actions[ids]) - old_logp[ids]).exp()
             unclipped = ratio * advantage[ids]
             clipped = ratio.clamp(0.8, 1.2) * advantage[ids]
-            divergence = kl_divergence(prior, dist).mean()
             loss = (
                 -torch.minimum(unclipped, clipped).mean()
                 + 0.5 * (returns[ids] - value).square().mean()
-                - 0.005 * dist.entropy().mean() + kl_coef * divergence
+                - 0.005 * dist.entropy().mean()
             )
+            if reference is not None:
+                with torch.no_grad():
+                    if reference_logits is not None and epoch > 0:
+                        logits = reference_logits[ids]
+                    else:
+                        logits, _ = reference.logits_and_value(*inputs)
+                        if reference_logits is not None:
+                            reference_logits[ids] = logits
+                    prior = Categorical(logits=logits, validate_args=False)
+                divergence = kl_divergence(prior, dist).mean()
+                loss = loss + kl_coef * divergence
+                divergences.append(float(divergence.detach().item()))
             optimizer.zero_grad(set_to_none=True)
             loss.backward()
             nn.utils.clip_grad_norm_(policy.parameters(), 0.5)
             optimizer.step()
-            divergences.append(float(divergence.detach().item()))
-    return float(np.mean(divergences))
+    return float(np.mean(divergences)) if divergences else None
 
 
 def frozen_policy(policy):

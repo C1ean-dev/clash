@@ -10,6 +10,8 @@ const rivalNames = {
   bc: "Modelo de imitação do mesmo deck", other_bc: "Modelo de imitação do outro deck",
   scripted: "X-Bow programado", hog_push: "Corredor", rg_patient: "Gigante Real",
   random: "Rival aleatório",
+  free: "IA de deck livre",
+  hog_26: "Corredor 2.6", royal_giant: "Gigante Real", splashyard: "Splashyard",
 };
 const groupNames = {
   ".": "Inicial", calibrated: "Calibrado", tactical: "Posicionamento por carta",
@@ -281,6 +283,17 @@ function syncReplayLimit(resume) {
 
 function stageProgress(job, info) {
   const event = info.event || "";
+  if (info.joint && event.startsWith("ppo")) {
+    const title = `X-Bow 3.0 × ${rivalNames[info.rival] || "IA adversária"}`;
+    if (event === "ppo_match") {
+      return ["ppo", title, `Jogando a partida ${info.update}/${info.total}`, info.done, info.total];
+    }
+    if (event === "ppo_game") {
+      return ["ppo", title, `Atualizando as duas IAs · partida ${info.update}/${info.total}`,
+        info.update - 0.5, info.total];
+    }
+    return ["ppo", title, `${info.done}/${info.total} atualizações concluídas`, info.done, info.total];
+  }
   if (event.startsWith("replays")) {
     return ["replays", "Reconstrução de replays", `${info.done}/${info.total} replays · ${info.rejected || 0} descartados`, info.done, info.total];
   }
@@ -299,7 +312,8 @@ function stageProgress(job, info) {
     return ["ppo", "Self-play", `${info.done}/${info.total} atualizações concluídas${simultaneousGames(info)}`, info.done, info.total];
   }
   if (event.startsWith("evaluation")) {
-    return ["evaluation", "Avaliação na arena", `${info.done}/${info.total} confrontos por modelo e rival${simultaneousGames(info)}`, info.done, info.total];
+    const detail = info.joint ? "partidas entre os dois modelos" : "confrontos por modelo e rival";
+    return ["evaluation", "Avaliação na arena", `${info.done}/${info.total} ${detail}${simultaneousGames(info)}`, info.done, info.total];
   }
   return [job.mode === "resume" ? "ppo" : "replays", "Preparando o treino", "Carregando o ambiente", null, null];
 }
@@ -313,6 +327,12 @@ function renderTraining() {
   if (!canResume) mode.value = "0";
   mode.disabled = !canResume;
   const resume = executionMode() === "resume";
+  const coevolve = byId("training-coevolve");
+  coevolve.disabled = data.joint_training !== "shared_match" || !resume || deck !== "xbow_30";
+  byId("training-coevolve-option").hidden = coevolve.disabled;
+  const joint = !coevolve.disabled && coevolve.checked;
+  byId("training-updates-title").textContent = joint ? "Partidas de treino" : "Atualizações PPO";
+  byId("training-games").closest("label").hidden = joint;
   for (const field of document.querySelectorAll("[data-new]")) {
     field.hidden = resume;
     field.querySelector("input").disabled = field.hidden;
@@ -320,7 +340,9 @@ function renderTraining() {
   syncSlider(mode);
   const canTrain = syncReplayLimit(resume);
   for (const key of parameterKeys.slice(1)) syncSlider(byId(`training-${key}`));
-  byId("training-deck").textContent = `Deck selecionado · ${deckNames[active ? job.deck : deck]}`;
+  byId("training-deck").textContent = active && job.parameters.coevolve
+    ? "Em treino · X-Bow 3.0 e IA adversária"
+    : `Deck selecionado · ${deckNames[active ? job.deck : deck]}`;
   byId("training-form").hidden = active;
   byId("training-settings").disabled = sending;
   byId("start-training").disabled = sending || !connected || (!resume && !canTrain);
@@ -328,7 +350,9 @@ function renderTraining() {
     resume ? "Retomar treino" : "Iniciar treino";
   let hint = "O máximo conta os replays candidatos do deck. O simulador pode aceitar menos.";
   if (resume) {
-    hint = `Continua o experimento ${groupNames[run.group] || run.group} a partir do último checkpoint.`;
+    hint = joint
+      ? "O rival alterna entre Corredor 2.6, Gigante Real e Splashyard. As duas IAs aprendem após cada partida."
+      : `Continua o experimento ${groupNames[run.group] || run.group} a partir do último checkpoint.`;
   } else if (!canTrain) {
     const messages = {
       ready: "Este deck precisa de pelo menos 2 replays candidatos.",
@@ -498,11 +522,14 @@ byId("training-form").addEventListener("submit", event => {
   event.preventDefault();
   if (byId("start-training").disabled || activeJob(data.job)) return;
   const payload = { deck, mode: executionMode(), run_id: current };
+  const coevolve = byId("training-coevolve");
+  payload.coevolve = !coevolve.disabled && coevolve.checked;
   for (const key of parameterKeys) {
     payload[key] = byId(`training-${key}`).valueAsNumber;
   }
   jobAction("start", payload);
 });
+byId("training-coevolve").addEventListener("change", renderTraining);
 byId("stop-job").addEventListener("click", () => jobAction("stop", { id: data.job.id }));
 byId("view-job").addEventListener("click", () => { follow(data.job); render(true); });
 byId("chart").addEventListener("pointermove", event => {
@@ -516,12 +543,19 @@ byId("chart").addEventListener("pointermove", event => {
   tooltip.style.left = `${Math.max(4, Math.min(point.x + 6, byId("plot").clientWidth - tooltip.offsetWidth - 4))}px`;
 });
 byId("chart").addEventListener("pointerleave", () => { byId("plot-tooltip").hidden = true; });
-document.querySelector("nav").addEventListener("click", event => {
-  const link = event.target.closest("a");
-  if (!link) return;
-  for (const existing of document.querySelectorAll("nav a")) existing.removeAttribute("aria-current");
-  link.setAttribute("aria-current", "location");
-});
+function highlightSection() {
+  const hash = location.hash || "#visao";
+  if (hash === "#cartas-decks") {
+    location.replace("/cartas-decks");
+    return;
+  }
+  for (const link of document.querySelectorAll(".sidebar nav a")) {
+    if (link.hash === hash) link.setAttribute("aria-current", "location");
+    else link.removeAttribute("aria-current");
+  }
+}
+window.addEventListener("hashchange", highlightSection);
+highlightSection();
 new ResizeObserver(drawChart).observe(byId("plot"));
 render();
 refresh();

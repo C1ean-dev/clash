@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#10151d">
+  <title>Cartas e decks · X-Bow Control</title>
+  <link rel="stylesheet" href="/dashboard.css">
+  <script defer src="/arena.js"></script>
+  <script defer src="/catalog.js"></script>
+</head>
+<body>
+  <main class="catalog-page">
+    <header class="page-heading">
+      <div><h1 id="catalog-title">Cartas e decks</h1><p>Veja a composição dos decks e consulte as cartas do simulador.</p></div>
+      <a class="secondary" href="/#visao">Voltar ao painel</a>
+    </header>
+    <section class="panel catalog" aria-labelledby="catalog-title">
+      <ul class="catalog-decks" id="catalog-decks" aria-label="Decks disponíveis"></ul>
+      <p class="muted catalog-status" id="catalog-status" role="status">Carregando o catálogo…</p>
+      <div id="catalog-browser" hidden>
+        <div class="catalog-toolbar">
+          <label>Deck
+            <select id="catalog-deck-filter">
+              <option value="">Todos os decks</option>
+              <option value="all">Catálogo completo</option>
+            </select>
+          </label>
+          <label>Buscar carta
+            <input id="catalog-search" type="search" placeholder="Nome da carta">
+          </label>
+          <a class="secondary" id="catalog-play" href="/#jogar" hidden>Usar na batalha</a>
+        </div>
+        <ul class="catalog-cards" id="catalog-cards" aria-label="Cartas"></ul>
+      </div>
+    </section>
+  </main>
+</body>
+</html>

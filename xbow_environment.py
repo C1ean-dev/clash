@@ -24,8 +24,16 @@ RIVAL_DECKS = {
         "royal-giant", "fisherman", "hunter", "royal-ghost", "skeletons",
         "electro-spirit", "lightning", "the-log",
     ),
+    "splashyard": (
+        "graveyard", "poison", "baby-dragon", "ice-wizard", "knight",
+        "tombstone", "barbarian-barrel", "tornado",
+    ),
 }
 OPENING_ELIXIR_MILLI = 6000  # RoyaleSim's standard full-match setup.
+PPO_GAMMA = 0.997
+JOINT_REWARD_PROFILES = ("legacy", "potential")
+ELIXIR_TRADE_WEIGHT = 0.15
+XBOW_LOCK_WEIGHT = 0.04
 
 
 class XBowLockReward(RewardFunction):
@@ -44,8 +52,11 @@ class XBowLockReward(RewardFunction):
             and unit.target_uid in towers
         }
 
+    def new_locks(self, team, prev, state):
+        return len(self.locks(state, team) - self.locks(prev, team))
+
     def get_reward(self, team, prev, state, results):
-        return float(len(self.locks(state, team) - self.locks(prev, team)))
+        return float(self.new_locks(team, prev, state))
 
 
 class PublicSpatialBuilder(SpatialObsBuilder):
@@ -113,12 +124,33 @@ class PublicBattleEnv(ClashParallelEnv):
         return results
 
 
-def battle_env(deck, rival_deck=None, *, decision_ms=500):
+def deck_card_ids(deck, card_ids):
     available = DECKS | RIVAL_DECKS
+    return [card_ids[CARD_NAMES[key]] for key in available[deck]]
+
+
+def battle_reward(profile):
+    if profile == "potential":
+        from royalelearn.rewards import default_potential_reward
+
+        reward = default_potential_reward()
+        reward.set_gamma(PPO_GAMMA)
+        return reward
+    if profile != "legacy":
+        raise ValueError(f"Perfil de recompensa desconhecido: {profile}")
+    return CombinedReward([
+        (WinLossReward(), 1.0),
+        (TowerHPReward(), 0.7),
+        (ElixirTradeReward(), ELIXIR_TRADE_WEIGHT),
+        (XBowLockReward(), XBOW_LOCK_WEIGHT),
+    ])
+
+
+def battle_env(deck, rival_deck=None, *, decision_ms=500, reward_profile="legacy"):
+    reward = battle_reward(reward_profile)
     engine = RustEngine()
     card_ids = {card.name: card.card_id for card in engine.cards()}
-    decks = [[card_ids[CARD_NAMES[key]] for key in available[name]]
-             for name in (deck, rival_deck or deck)]
+    decks = [deck_card_ids(name, card_ids) for name in (deck, rival_deck or deck)]
     return PublicBattleEnv(
         engine,
         state_mutator=DefaultStateMutator(decks=decks),
@@ -128,10 +160,5 @@ def battle_env(deck, rival_deck=None, *, decision_ms=500):
             reveal=Reveal(), enemy_queue=True, evolutions=True,
             evolution_progress=True, heroes=True, button_index=True,
         ),
-        reward_fn=CombinedReward([
-            (WinLossReward(), 1.0),
-            (TowerHPReward(), 0.7),
-            (ElixirTradeReward(), 0.15),
-            (XBowLockReward(), 0.04),
-        ]),
+        reward_fn=reward,
     )

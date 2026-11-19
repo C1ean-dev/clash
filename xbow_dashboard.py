@@ -2,17 +2,25 @@
 
 import argparse
 from datetime import datetime, timezone
+import errno
+from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import socket
 from threading import Timer
 from urllib.parse import parse_qs, urlsplit
 import webbrowser
 
+from royalegym import RustEngine
+
 from xbow_dashboard_jobs import BusyError, DashboardJobs, DECKS
 from xbow_arena import STAGES, clip_data
+from xbow_environment import RIVAL_DECKS
+from xbow_metrics import read_training_journal
+from xbow_replays import CARD_NAMES, DECKS as X_BOW_DECKS
 from xbow_video_catalog import VideoCatalog
-from xbow_play_session import ACTIVE_SESSIONS, DECK_LABELS, list_available_models
+from xbow_play_session import ACTIVE_SESSIONS, DECK_LABELS, card_pt_name, list_available_models
 
 
 ROOT = Path(__file__).resolve().parent
@@ -21,12 +29,32 @@ JOBS = DashboardJobs(ROOT)
 VIDEOS = VideoCatalog(RUNS / ".replay-sources" / "alphaclash-manifest.jsonl")
 ASSETS = {
     "/": ("index.html", "text/html"),
+    "/cartas-decks": ("catalog.html", "text/html"),
     "/dashboard.css": ("dashboard.css", "text/css"),
     "/dashboard.js": ("dashboard.js", "text/javascript"),
     "/arena.js": ("arena.js", "text/javascript"),
     "/videos.js": ("videos.js", "text/javascript"),
     "/play.js": ("play.js", "text/javascript"),
+    "/catalog.js": ("catalog.js", "text/javascript"),
 }
+
+
+@lru_cache(maxsize=1)
+def card_catalog():
+    cards = RustEngine().cards()
+    decks = X_BOW_DECKS | RIVAL_DECKS
+    return {
+        "cards": [
+            {"name": card.name, "label": card_pt_name(card.name), "elixir": card.elixir,
+             "kind": card.card_kind, "flying": card.flying}
+            for card in cards
+        ],
+        "decks": [
+            {"id": deck, "label": DECK_LABELS[deck].partition(" (")[0],
+             "cards": [CARD_NAMES[key] for key in decks[deck]]}
+            for deck in DECK_LABELS
+        ],
+    }
 
 
 def json_file(path):
@@ -35,22 +63,6 @@ def json_file(path):
     except (OSError, UnicodeError, ValueError):
         return {}
     return value if isinstance(value, dict) else {}
-
-
-def journal(path):
-    try:
-        with path.open(encoding="utf-8") as stream:
-            for line in stream:
-                if not line.endswith("\n"):
-                    break
-                try:
-                    entry = json.loads(line, parse_constant=lambda _: None)
-                except ValueError:
-                    continue
-                if isinstance(entry, dict) and "attempt" in entry:
-                    yield entry
-    except (OSError, UnicodeError):
-        return
 
 
 def latest_evaluation(path, selfplay):
@@ -74,7 +86,7 @@ def modified(path):
 
 def experiment(path):
     report = json_file(path / "selfplay.json")
-    events = list(journal(path / "progress.jsonl"))
+    events = list(read_training_journal(path / "progress.jsonl"))
     updates = {row["update"]: row for row in report.get("updates", [])
                if isinstance(row, dict) and isinstance(row.get("update"), int)}
     epochs, split, phase = [], {}, {}
@@ -111,7 +123,7 @@ def experiment(path):
     if not (events or current_report or current_validation or any(checkpoints.values())):
         return None
     evaluation = latest_evaluation(path, current_report)
-    if phase.get("event") in ("replays", "bc_start", "bc_batch", "bc_epoch", "ppo_start", "ppo_game",
+    if phase.get("event") in ("replays", "bc_start", "bc_batch", "bc_epoch", "ppo_start", "ppo_match", "ppo_game",
                               "ppo_update", "evaluation_start", "evaluation_pair"):
         evaluation = {}
     return {
@@ -138,6 +150,7 @@ def dashboard_data():
     inventory = JOBS.inventory.snapshot()
     return {
         "runs": runs, "job": JOBS.current(),
+        "joint_training": "shared_match",
         "parts": inventory["parts"], "inventory": inventory,
         "refreshed": datetime.now(timezone.utc).isoformat(),
     }
@@ -157,6 +170,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             self.arena(parse_qs(url.query))
         elif path == "/api/play/models":
             self.reply_json({"models": list_available_models(), "decks": DECK_LABELS}, 200)
+        elif path == "/api/catalog":
+            self.reply_json(card_catalog(), 200)
         elif path == "/api/play/state":
             session = ACTIVE_SESSIONS.get_session()
             if not session:
@@ -246,8 +261,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         try:
             if route == "/api/play/start":
                 human_deck = payload.get("human_deck", "hog_26")
-                ai_deck = payload.get("ai_deck", "xbow_30")
                 model_id = payload.get("model_id", "scripted:xbow")
+                ai_deck = payload.get("ai_deck", "hog_26" if model_id == "rival:live" else "xbow_30")
                 speed = float(payload.get("speed", 1.0))
                 session = ACTIVE_SESSIONS.start_session(human_deck, ai_deck, model_id, speed)
                 self.reply_json({"ok": True, "session_id": session.session_id, "state": session.snapshot()}, 200)
@@ -290,22 +305,48 @@ class DashboardHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
-        self.end_headers()
-        self.wfile.write(data)
+        try:
+            self.end_headers()
+            self.wfile.write(data)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
 
     def log_message(self, _format, *_args):
         pass
 
 
-def main():
+class DashboardServer(ThreadingHTTPServer):
+    def server_bind(self):
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            self.allow_reuse_address = False
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
+def bind_dashboard(port, *, fallback_port=False):
+    try:
+        return DashboardServer(("127.0.0.1", port), DashboardHandler)
+    except OSError as exc:
+        unavailable = {errno.EADDRINUSE}
+        if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+            unavailable.update((errno.WSAEADDRINUSE, errno.WSAEACCES))
+        if not fallback_port or exc.errno not in unavailable:
+            raise
+        return DashboardServer(("127.0.0.1", 0), DashboardHandler)
+
+
+def main(*, open_by_default=False, fallback_port=False):
     import torch
 
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8766)
-    parser.add_argument("--open", action="store_true", help="Abre o painel no navegador")
+    parser.add_argument("--open", action=argparse.BooleanOptionalAction, default=open_by_default,
+                        help="Abre o painel no navegador")
     args = parser.parse_args()
+    if not 0 <= args.port <= 65535:
+        parser.error("--port deve estar entre 0 e 65535")
     torch.set_num_threads(1)
-    with ThreadingHTTPServer(("127.0.0.1", args.port), DashboardHandler) as server:
+    with bind_dashboard(args.port, fallback_port=fallback_port) as server:
         url = f"http://127.0.0.1:{server.server_port}/"
         print(f"Painel X-Bow Control em {url}", flush=True)
         if args.open:

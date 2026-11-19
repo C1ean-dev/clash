@@ -18,8 +18,14 @@
     hogrider: ["➤", "#efae85", 12], musketeer: ["⊙", "#c9aef6", 13], cannon: ["◉", "#d2bc91", 14],
     icegolemite: ["◆", "#bce3ef", 15], royalgiant: ["♜", "#e5cb79", 16], hunter: ["⋔", "#b9dca2", 17],
     fisherman: ["⚓", "#accfd6", 18], ghost: ["◌", "#d9e7ee", 19], lightning: ["ϟ", "#e0beff", 20],
+    graveyard: ["†", "#88c7bb", 21], poison: ["✹", "#a9d96f", 22], babydragon: ["◆", "#e59573", 23],
+    tombstone: ["▰", "#c3b5a2", 24], barblog: ["◉", "#e0ac74", 25],
+    megaminion: ["▼", "#a7add7", 26], angrybarbarians: ["⚔", "#e2a08d", 27], goblins: ["◆", "#94c790", 28],
+    valkyrie: ["◇", "#e4af8c", 29], balloon: ["◉", "#d7a2bd", 30], infernotower: ["▲", "#f2b370", 31],
+    bats: ["✦", "#c2a6db", 32], miner: ["◆", "#d3b18a", 33], mortar: ["▰", "#b8c19b", 34],
+    witch: ["✧", "#a8c3b2", 35],
   };
-  const columns = 5;
+  const columns = 6;
   const portraits = new Image();
   const portraitAsset = getComputedStyle(document.documentElement).getPropertyValue("--battle-card-portraits").trim();
   const portraitUrl = portraitAsset.match(/^url\("([^"]+)"\)$/)?.[1];
@@ -32,7 +38,8 @@
     const key = name.toLowerCase().replace(/_ev\d.*$/, "").replace(/[^a-z]/g, "");
     return ({thelog: "log", otronco: "log", boladefogo: "fireball",
       icegolem: "icegolemite", royalghost: "ghost",
-      archer: "archers", skeleton: "skeletons", icespirit: "icespirits"})[key] || key;
+      archer: "archers", skeleton: "skeletons", icespirit: "icespirits",
+      barbarianbarrel: "barblog", elitebarbarians: "angrybarbarians"})[key] || key;
   }
 
   function skin(name) {
@@ -427,6 +434,7 @@
 (() => {
   const el = id => document.getElementById(`arena-${id}`);
   const board = el("board");
+  if (!board) return;
   const {colors: tones, reducedMotion, skin, cardKey, portraitPosition, spellName, spellCast, castVisible,
     createRenderer} = window.battleArt;
   const {ctx, begin, ring, drawPieces, paintSpellArea, drawCastArea, drawCast, drawCardPreview} =
@@ -435,13 +443,18 @@
   const recordings = new Map();
   const tabs = [...document.querySelectorAll("[data-view-stage]")];
   const rivals = { bc: "Imitação", other_bc: "Imitação do outro deck", scripted: "X-Bow programado",
-    hog_push: "Corredor", rg_patient: "Gigante Real", random: "Aleatório" };
+    hog_push: "Corredor", rg_patient: "Gigante Real", random: "Aleatório",
+    hog_26: "Corredor 2.6", royal_giant: "Gigante Real", splashyard: "Splashyard" };
   const cards = {xbow: "X-Bow", tesla: "Tesla", knight: "Cavaleiro", archers: "Arqueiras",
     skeletons: "Esqueletos", fireball: "Bola de Fogo", log: "O Tronco", electrospirit: "Espírito Elétrico",
     icespirits: "Espírito de Gelo", icewizard: "Mago de Gelo", rocket: "Foguete", tornado: "Tornado",
     hogrider: "Corredor", musketeer: "Mosqueteira", cannon: "Canhão", icegolemite: "Golem de Gelo",
     royalgiant: "Gigante Real", hunter: "Caçador", fisherman: "Pescador", ghost: "Fantasma Real",
-    lightning: "Relâmpago"};
+    lightning: "Relâmpago", graveyard: "Cemitério", poison: "Veneno", babydragon: "Bebê Dragão",
+    tombstone: "Lápide", barblog: "Barril de Bárbaro", megaminion: "Megasservo",
+    angrybarbarians: "Bárbaros de Elite", goblins: "Goblins", valkyrie: "Valquíria",
+    balloon: "Balão", infernotower: "Torre Inferno", bats: "Morcegos", miner: "Mineiro",
+    mortar: "Morteiro", witch: "Bruxa"};
   const replayErrors = { "ability unavailable or ambiguous": "habilidade indisponível ou ambígua",
     "card not in hand": "a carta registrada não estava na mão",
     "play refused by engine": "jogada recusada pelo simulador",

@@ -18,6 +18,22 @@ def check_training_stop():
         raise TrainingStopped()
 
 
+def read_training_journal(path):
+    try:
+        with path.open(encoding="utf-8") as stream:
+            for line in stream:
+                if not line.endswith("\n"):
+                    break
+                try:
+                    entry = json.loads(line, parse_constant=lambda _: None)
+                except ValueError:
+                    continue
+                if isinstance(entry, dict) and "attempt" in entry:
+                    yield entry
+    except (OSError, UnicodeError):
+        return
+
+
 @contextmanager
 def training_journal(output, deck):
     output.mkdir(parents=True, exist_ok=True)

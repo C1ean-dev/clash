@@ -20,6 +20,7 @@
     <nav aria-label="Seções do painel">
       <a href="#visao" aria-current="location"><span class="nav-mark overview" aria-hidden="true"></span>Visão geral</a>
       <a href="#jogar"><span class="nav-mark rounds" aria-hidden="true"></span>Jogar contra a IA</a>
+      <a href="/cartas-decks"><span class="nav-mark review" aria-hidden="true"></span>Cartas e decks</a>
       <a href="#arena"><span class="nav-mark rounds" aria-hidden="true"></span>Arena do treino</a>
       <a href="#videos"><span class="nav-mark rounds" aria-hidden="true"></span>Vídeos do Royale TV</a>
       <a href="#rivais"><span class="nav-mark rounds" aria-hidden="true"></span>Rivais</a>
@@ -55,7 +56,7 @@
       <div class="section-head">
         <div>
           <h2 id="play-title">Batalha contra a IA</h2>
-          <p id="play-subtitle">Escolha seu deck e desafie um bot tático ou um modelo treinado.</p>
+          <p id="play-subtitle">Escolha seu deck e enfrente um dos modelos treinados.</p>
         </div>
         <span class="job-badge" id="play-badge">Pronto</span>
       </div>
@@ -68,15 +69,20 @@
               <select id="play-human-deck">
                 <option value="hog_26">Corredor 2.6</option>
                 <option value="royal_giant">Gigante Real</option>
+                <option value="splashyard">Splashyard</option>
                 <option value="xbow_30">X-Bow 3.0</option>
                 <option value="icebow">IceBow</option>
               </select>
             </label>
             <label class="play-field">
               Oponente
-              <select id="play-ai-model">
-                <option value="scripted:xbow">Bot tático · X-Bow</option>
+              <select id="play-ai-model" disabled>
+                <option value="">Carregando oponentes…</option>
               </select>
+            </label>
+            <label class="play-field" id="play-rival-field" hidden>
+              Deck do Rival Live
+              <select id="play-rival-deck"></select>
             </label>
             <label class="play-field">
               Velocidade
@@ -89,7 +95,7 @@
             </label>
           </div>
           <div class="play-form-actions">
-            <button class="primary play-start-btn" id="play-start-btn" type="submit">Iniciar batalha</button>
+            <button class="primary play-start-btn" id="play-start-btn" type="submit" disabled>Iniciar batalha</button>
             <p class="play-setup-message" id="play-setup-message" role="status"></p>
           </div>
         </form>
@@ -187,8 +193,12 @@
             <input id="training-epochs" type="range" min="1" max="30" value="3">
             <span class="slider-bounds" aria-hidden="true"><span>1</span><span>30</span></span>
           </label>
+          <label id="training-coevolve-option" hidden>
+            <input id="training-coevolve" type="checkbox">
+            Treinar X-Bow e a IA adversária na mesma partida
+          </label>
           <label class="training-slider">
-            <span class="slider-head"><span>Atualizações PPO</span><span class="slider-value" aria-hidden="true">4</span></span>
+            <span class="slider-head"><span id="training-updates-title">Atualizações PPO</span><span class="slider-value" aria-hidden="true">4</span></span>
             <input id="training-updates" type="range" min="1" max="100" value="4">
             <span class="slider-bounds" aria-hidden="true"><span>1</span><span>100</span></span>
           </label>

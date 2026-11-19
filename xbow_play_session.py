@@ -1,21 +1,24 @@
 """Interactive play session against trained X-Bow and tactical AI models."""
 
 from collections import deque
+from functools import lru_cache
 from math import isfinite
 from pathlib import Path
+from pickle import UnpicklingError
 import random
 from threading import Event, Lock, RLock, Thread
 import time
 from uuid import uuid4
 
 import numpy as np
+import torch
 from royalegym.protocol import (
     DeployStatus, HAND_SIZE, STATUS_INVISIBLE, STATUS_UNDERGROUND, slot_cost, status_of,
 )
 from xbow_environment import battle_env, RIVAL_DECKS
 from xbow_replays import DECKS
 from xbow_selfplay import scripted_move
-from xbow_training import load_checkpoint
+from xbow_training import load_checkpoint, policy_from_checkpoint
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
@@ -69,11 +72,16 @@ CARD_PT_NAMES = {
     "Arrows": "Flechas",
     "Zap": "Zap",
     "Poison": "Veneno",
+    "Graveyard": "Cemitério",
+    "BabyDragon": "Bebê Dragão",
+    "Tombstone": "Lápide",
+    "BarbLog": "Barril de Bárbaro",
 }
 
 DECK_LABELS = {
     "hog_26": "Corredor 2.6 (Ciclo Rápido)",
     "royal_giant": "Gigante Real (Controle Pesado)",
+    "splashyard": "Splashyard",
     "xbow_30": "X-Bow 3.0 (Ciclo de Cerco)",
     "icebow": "IceBow (Defesa de Gelo e Foguete)",
 }
@@ -83,96 +91,70 @@ def card_pt_name(name):
     return CARD_PT_NAMES.get(name) or CARD_PT_NAMES.get(name.replace("-", " ").title()) or name
 
 
-def list_available_models():
-    """Discover available trained checkpoints and AI opponents."""
-    models = []
+PLAY_MODELS = {
+    "final:xbow_30": "X-Bow 3.0 Final",
+    "final:icebow": "IceBow Final",
+    "rival:live": "Rival Live",
+}
+
+
+@lru_cache(maxsize=32)
+def checkpoint_summary(path, stamp):
+    """Cache metadata until the trainer replaces the checkpoint."""
+    try:
+        saved = torch.load(path, map_location="meta", weights_only=True)
+        free = (saved.get("trainer") or {}).get("free_model") or {}
+        rival = free.get("deck") == "free" and free.get("phase") == "ppo"
+        return saved.get("deck"), saved.get("phase"), rival
+    except (OSError, RuntimeError, ValueError, EOFError, UnpicklingError):
+        return None, None, False
+
+
+def latest_model_paths():
     root = RUNS.resolve()
-
-    # Pre-defined scripted bots
-    models.append({
-        "id": "scripted:xbow",
-        "label": "Bot de Regras · X-Bow Programado",
-        "deck": "xbow_30",
-        "kind": "scripted",
-        "desc": "Posicionamento tático programado de X-Bow e Tesla"
-    })
-    models.append({
-        "id": "scripted:hog_push",
-        "label": "Bot Tático · Push de Corredor",
-        "deck": "hog_26",
-        "kind": "scripted",
-        "desc": "Oponente de pressão ofensiva contínua"
-    })
-    models.append({
-        "id": "scripted:rg_patient",
-        "label": "Bot Tático · Gigante Real Paciente",
-        "deck": "royal_giant",
-        "kind": "scripted",
-        "desc": "Oponente focado em contra-ataques calculados"
-    })
-
-    if not root.is_dir():
-        return models
-
-    # Scan checkpoints in runs/
-    seen = set()
-    for path in sorted(root.glob("**/*.pt")):
-        if path.name.startswith("."):
+    candidates = []
+    for path in root.rglob("ppo.pt"):
+        if path.parent.name not in DECKS or any(
+            part.startswith(".") for part in path.relative_to(root).parts
+        ):
             continue
-        try:
-            rel = path.relative_to(root).as_posix()
-        except ValueError:
-            continue
-
-        parts = rel.split("/")
-        # Expected patterns: group/deck/phase.pt or group/deck/league/number.pt
-        phase_or_name = path.stem
-        deck_candidate = parts[-2] if len(parts) >= 2 else ""
-        if deck_candidate not in DECKS:
-            if len(parts) >= 3 and parts[-3] in DECKS:
-                deck_candidate = parts[-3]
-            else:
+        resolved = path.resolve()
+        if resolved.is_relative_to(root):
+            try:
+                stat = resolved.stat()
+            except OSError:
                 continue
+            candidates.append((stat.st_mtime_ns, stat.st_size, resolved))
+    latest = {}
+    for modified, size, path in sorted(candidates, reverse=True):
+        deck, phase, has_rival = checkpoint_summary(path, (modified, size))
+        if phase == "ppo" and deck == path.parent.name:
+            latest.setdefault(f"final:{deck}", path)
+            if deck == "xbow_30" and has_rival:
+                latest.setdefault("rival:live", path)
+        if len(latest) == len(PLAY_MODELS):
+            break
+    if "rival:live" not in latest:
+        bootstrap = root / ".rival-live-bootstrap" / "xbow_30" / "ppo.pt"
+        try:
+            stat = bootstrap.stat()
+        except OSError:
+            return latest
+        if bootstrap.resolve().is_relative_to(root) and checkpoint_summary(
+            bootstrap, (stat.st_mtime_ns, stat.st_size)
+        ) == ("xbow_30", "ppo", True):
+            latest["rival:live"] = bootstrap
+    return latest
 
-        group = parts[0] if len(parts) > 2 else "padrão"
-        group_label = {
-            "tactical": "Tático",
-            "calibrated": "Calibrado",
-            "public": "Observação Pública",
-            "resume-check": "Retomada",
-        }.get(group, group)
 
-        if "assistido-" in group:
-            group_label = "Treino Assistido"
-
-        deck_display = "X-Bow 3.0" if deck_candidate == "xbow_30" else "IceBow"
-
-        if phase_or_name in ("ppo", "bc"):
-            label_kind = "PPO (Reforço)" if phase_or_name == "ppo" else "Imitação BC (Humana)"
-            label = f"{deck_display} · {label_kind} ({group_label})"
-            rec_id = f"ckpt:{rel}"
-            if rec_id not in seen:
-                seen.add(rec_id)
-                models.append({
-                    "id": rec_id,
-                    "label": label,
-                    "deck": deck_candidate,
-                    "path": rel,
-                    "kind": "checkpoint",
-                    "phase": phase_or_name,
-                    "desc": f"Rede neural treinada ({label_kind})"
-                })
-
-    # Put tactical ppo checkpoints at the top of checkpoints list
-    def sort_key(item):
-        if item["kind"] == "checkpoint":
-            is_ppo = item.get("phase") == "ppo"
-            is_tactical = "tactical" in item.get("path", "")
-            return (0 if (is_ppo and is_tactical) else 1 if is_ppo else 2, item["label"])
-        return (3, item["label"])
-
-    models.sort(key=sort_key)
-    return models
+def list_available_models():
+    latest = latest_model_paths()
+    return [
+        {"id": model_id, "label": label, "available": model_id in latest,
+         **({"decks": {deck: DECK_LABELS[deck].partition(" (")[0] for deck in RIVAL_DECKS}}
+            if model_id == "rival:live" else {})}
+        for model_id, label in PLAY_MODELS.items()
+    ]
 
 
 class PlaySession:
@@ -221,6 +203,23 @@ class PlaySession:
     def _load_model(ai_deck, model_id):
         if not isinstance(model_id, str):
             raise ValueError("Escolha um oponente válido.")
+        if model_id in PLAY_MODELS:
+            path = latest_model_paths().get(model_id)
+            if path is None:
+                raise ValueError(f"{PLAY_MODELS[model_id]} ainda não tem um checkpoint de treino.")
+            if model_id == "rival:live" and (not isinstance(ai_deck, str) or ai_deck not in RIVAL_DECKS):
+                raise ValueError("Escolha um deck para o Rival Live.")
+            try:
+                if model_id == "rival:live":
+                    saved = torch.load(path, map_location="cpu", weights_only=True)
+                    policy = policy_from_checkpoint(saved["trainer"]["free_model"], "free", "cpu")
+                    label = DECK_LABELS[ai_deck].partition(" (")[0]
+                    return ai_deck, policy, f"Rival Live · {label}"
+                deck = path.parent.name
+                policy, _ = load_checkpoint(path, deck, device="cpu")
+                return deck, policy, PLAY_MODELS[model_id]
+            except (OSError, KeyError, ValueError, RuntimeError, EOFError, UnpicklingError) as exc:
+                raise ValueError("Não foi possível carregar o checkpoint selecionado.") from exc
         if model_id.startswith("ckpt:"):
             root = RUNS.resolve()
             path = (root / model_id.removeprefix("ckpt:")).resolve()

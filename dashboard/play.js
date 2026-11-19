@@ -3,6 +3,11 @@
 (() => {
   const el = id => document.getElementById("play-" + id);
   const board = el("board");
+  const humanDeck = el("human-deck");
+  const requestedDeck = new URLSearchParams(location.search).get("deck");
+  if ([...humanDeck.options].some(option => option.value === requestedDeck)) {
+    humanDeck.value = requestedDeck;
+  }
   const {colors, reducedMotion, skin, portraitPosition, spellName, spellCast, castEnds, castVisible,
     createRenderer} = window.battleArt;
   const {ctx, begin, ring, stroke, drawPieces, paintSpellArea, drawCastArea, drawCast} = createRenderer(board);
@@ -71,20 +76,28 @@
     return data;
   }
 
+  function showRivalDeck() {
+    el("rival-field").hidden = el("ai-model").value !== "rival:live";
+  }
+
   async function loadModels() {
     try {
       const {models} = await api("models");
-      const groups = Object.fromEntries(["checkpoint", "scripted"].map(kind => [kind, document.createElement("optgroup")]));
-      groups.checkpoint.label = "Modelos treinados";
-      groups.scripted.label = "Bots táticos";
-      for (const model of models) groups[model.kind]?.append(new Option(model.label, model.id));
-      const options = Object.values(groups).filter(group => group.children.length);
-      if (!options.length) return;
-      el("ai-model").replaceChildren(...options);
-      const preferred = models.find(model => model.id === "ckpt:tactical/xbow_30/ppo.pt");
-      if (preferred) el("ai-model").value = preferred.id;
+      const live = models.find(model => model.id === "rival:live");
+      if (!live) throw new Error();
+      el("ai-model").replaceChildren(...models.map(model => {
+        const label = model.available ? model.label : model.label + " · aguardando treino";
+        const option = new Option(label, model.id);
+        option.disabled = !model.available;
+        return option;
+      }));
+      el("rival-deck").replaceChildren(...Object.entries(live.decks).map(([id, label]) => new Option(label, id)));
+      const first = models.find(model => model.available);
+      el("ai-model").value = first?.id ?? "";
+      el("ai-model").disabled = el("start-btn").disabled = !first;
+      showRivalDeck();
     } catch {
-      text(el("setup-message"), "Lista de modelos indisponível. O bot tático continua na seleção.");
+      text(el("setup-message"), "Lista de oponentes indisponível. Abra a versão atualizada do painel.");
     }
   }
 
@@ -92,6 +105,8 @@
     event?.preventDefault();
     const button = el("start-btn");
     if (button.disabled) return;
+    const deck = humanDeck.value;
+    const opponent = el("ai-model").value;
     initAudio();
     button.disabled = el("rematch-btn").disabled = true;
     text(button, "Preparando…");
@@ -99,7 +114,8 @@
     el("setup-message").removeAttribute("data-error");
     try {
       const data = await api("start", {
-        human_deck: el("human-deck").value, model_id: el("ai-model").value,
+        human_deck: deck, model_id: opponent,
+        ai_deck: opponent === "rival:live" ? el("rival-deck").value : undefined,
         speed: Number(el(state ? "live-speed" : "speed").value)
       });
       clearTimeout(pollTimer);
@@ -120,7 +136,9 @@
     } catch (error) {
       const node = el(state ? "result-detail" : "setup-message");
       node.setAttribute("data-error", "");
-      text(node, error.message);
+      text(node, error.message === `'${deck}'`
+        ? "Reinicie o servidor do painel para carregar este deck."
+        : error.message);
     } finally {
       button.disabled = el("rematch-btn").disabled = false;
       text(button, "Iniciar batalha");
@@ -483,6 +501,7 @@
   });
   el("rematch-btn").addEventListener("click", start);
   el("new-match-btn").addEventListener("click", backToSetup);
+  el("ai-model").addEventListener("change", showRivalDeck);
   el("form").addEventListener("submit", start);
   loadModels();
 

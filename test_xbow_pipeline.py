@@ -1,4 +1,7 @@
 import unittest
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import Mock, patch
 
 import numpy as np
 import torch
@@ -7,12 +10,32 @@ from royalegym.protocol import (
 )
 from royaleimitate.replays import CARD_NAMES
 
-from xbow_environment import battle_env
+from xbow_environment import PPO_GAMMA, battle_env
 from xbow_capture_bridge import CaptureBridge
+from xbow_dashboard import DashboardHandler
 from xbow_play_session import PlaySession, PLAY_STEP_MS
 from xbow_public_feed import PublicFeed
 from xbow_replays import DECKS
+from xbow_selfplay import Match, Rival, play_wave
 from xbow_training import clone_loss, kata_weights
+
+
+class DashboardResponseTests(unittest.TestCase):
+    def test_client_abort_closes_response_during_headers_or_body(self):
+        for previous_writes in (0, 1):
+            with self.subTest(previous_writes=previous_writes):
+                handler = DashboardHandler.__new__(DashboardHandler)
+                handler.request_version = "HTTP/1.1"
+                handler.requestline = "GET /api/videos HTTP/1.1"
+                handler.close_connection = False
+                error = ConnectionAbortedError(10053, "Cliente desconectado")
+                handler.wfile = Mock()
+                handler.wfile.write.side_effect = [None] * previous_writes + [error]
+
+                handler.reply_json({"ok": True}, 200)
+
+                self.assertTrue(handler.close_connection)
+                self.assertEqual(handler.wfile.write.call_count, previous_writes + 1)
 
 
 class PublicObservationTests(unittest.TestCase):
@@ -80,6 +103,60 @@ class ResamplingTests(unittest.TestCase):
         loss = clone_loss(distribution, torch.tensor([0, 1, 1, 1]),
                           torch.tensor([2, 2 / 3, 2 / 3, 2 / 3]))
         torch.testing.assert_close(loss, expected_timing + weighted_choice)
+
+
+class JointTrainingTests(unittest.TestCase):
+    def test_potential_is_zero_sum_and_leaves_the_discounted_outcome_objective(self):
+        env = battle_env("xbow_30", "hog_26", reward_profile="potential")
+        self.addCleanup(env.close)
+        env.reset(seed=42, options={"setup": MatchSetup(
+            decks=env.state_mutator.decks, elixir_milli=[10000, 6000],
+        )})
+        initial = env.battle_state
+        initial_potential = sum(float(term.potential(initial, 0)) * weight
+                                for term, weight in env.reward_fn.terms[1:])
+        self.assertGreater(initial_potential, 0)
+        discount = 1.0
+        shaping_return = 0.0
+        while env.agents:
+            _, reward, *_ = env.step({"blue": 0, "red": 0})
+            self.assertEqual(reward["blue"], -reward["red"])
+            terms = env.reward_fn.terms_for(0)
+            self.assertNotIn("XBowLockReward", terms)
+            shaping_return += discount * sum(value for name, value in terms.items() if name != "terminal")
+            discount *= PPO_GAMMA
+        self.assertTrue(env.battle_state.game_over)
+        self.assertAlmostEqual(shaping_return, -initial_potential)
+
+    def test_same_match_records_actions_and_rewards_from_each_side(self):
+        env = battle_env("hog_26", "xbow_30")
+        self.addCleanup(env.close)
+        reset, step = env.reset, env.step
+        xbow, free = Mock(), Mock()
+        xbow.decide.return_value = (0, -0.25, 0.0)
+        free.decide.return_value = (0, -0.75, 0.0)
+        match = Match(Rival("free", "free", free), seat=1, seed=42, number=1)
+
+        def short_match(*, seed, options):
+            return reset(seed=seed, options={**options, "max_ticks": 60})
+
+        def reward_by_side(actions):
+            obs, _, terminated, truncated, infos = step(actions)
+            return obs, {"blue": -1.0, "red": 1.0}, terminated, truncated, infos
+
+        with TemporaryDirectory() as folder, patch.object(env, "reset", side_effect=short_match), \
+                patch.object(env, "step", side_effect=reward_by_side):
+            [(xbow_run, free_run)] = play_wave(Path(folder), "ppo", xbow, [match], [env], "cpu",
+                                                collect=True, collect_both=True)
+        xbow_stats, xbow_rows = xbow_run
+        free_stats, free_rows = free_run
+        self.assertEqual(xbow_stats["steps"], free_stats["steps"])
+        self.assertGreater(xbow_stats["reward"], 0)
+        self.assertEqual(xbow_stats["reward"], -free_stats["reward"])
+        np.testing.assert_array_equal(xbow_rows[4], -0.25)
+        np.testing.assert_array_equal(free_rows[4], -0.75)
+        self.assertTrue(np.all(xbow_rows[-2] > 0))
+        self.assertTrue(np.all(free_rows[-2] < 0))
 
 
 class PlaySessionTests(unittest.TestCase):

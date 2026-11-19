@@ -238,6 +238,9 @@ class DashboardJobs:
         deck, mode = request.get("deck"), request.get("mode")
         if not isinstance(deck, str) or deck not in DECKS or mode not in ("new", "resume"):
             raise ValueError("Escolha um deck e um tipo de treinamento válidos.")
+        coevolve = request.get("coevolve", False)
+        if type(coevolve) is not bool or (coevolve and (deck != "xbow_30" or mode != "resume")):
+            raise ValueError("O treino conjunto está disponível ao retomar X-Bow 3.0.")
         limits = {"updates": (1, 100), "games": (1, 32), "evaluate": (0, 48)}
         if mode == "new":
             inventory = self.inventory.snapshot()
@@ -255,6 +258,8 @@ class DashboardJobs:
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"Valor fora do intervalo permitido para {key}.")
             params[key] = value
+        if coevolve:
+            params["games"] = 1
         job_id = uuid4().hex
         args = [
             sys.executable, "-u", str(self.root / "xbow_dual_learning_pipeline.py"),
@@ -277,6 +282,9 @@ class DashboardJobs:
                     or not all((output / f"{stage}.pt").is_file() for stage in ("bc", "ppo"))):
                 raise ValueError("O experimento selecionado precisa ter os checkpoints de imitação e PPO.")
             args += ["--bc-checkpoint", str(output / "bc.pt"), "--resume-ppo"]
+        if coevolve:
+            args.append("--coevolve")
+        params["coevolve"] = coevolve
         args += ["--output", str(output)]
         folder = self.store / job_id
         folder.mkdir()

@@ -7,14 +7,16 @@ Treino de X-Bow 3.0 e IceBow com partidas vencedoras do IL_Replay e self-play no
 No PowerShell, abra a pasta do projeto e execute:
 
 ```powershell
-.\.venv\Scripts\python.exe xbow_dashboard.py --open
+.\.venv\Scripts\python.exe main.py
 ```
+
+O comando sobe o painel de treino e batalha, imprime a URL no terminal e abre o navegador. A porta padrão é 8766. Se ela estiver ocupada, o painel abre em outra porta livre. Use `--no-open` para só imprimir a URL ou `Ctrl+C` no terminal para fechar a instância.
 
 ### 🎮 Jogar contra a IA
 
-Acesse a seção **Jogar contra a IA** diretamente no painel web (ou em `http://127.0.0.1:8766/#jogar`):
-- **Escolha seu deck**: Corredor 2.6, Gigante Real, X-Bow 3.0 ou IceBow.
-- **Escolha o oponente (IA)**: selecione qualquer checkpoint treinado (PPO ou Imitação BC de qualquer experimento salvo em `runs/`) ou bots de regras programados.
+Acesse a seção **Jogar contra a IA** no painel aberto pelo comando.
+- **Escolha seu deck**: Corredor 2.6, Gigante Real, Splashyard, X-Bow 3.0 ou IceBow.
+- **Escolha o oponente (IA)**: X-Bow 3.0 Final, IceBow Final ou Rival Live. Os modelos finais carregam o PPO mais recente salvo de cada deck. O Rival Live carrega o checkpoint adversário mais recente do treino conjunto e pode jogar com Corredor 2.6, Gigante Real ou Splashyard.
 - **Ajuste a velocidade** de 0,5× a 1,5×. A velocidade também pode ser ajustada durante a batalha.
 - **Controles de batalha**:
   - Arraste uma carta para uma casa destacada ou selecione a carta e clique ou toque na arena.
@@ -23,13 +25,15 @@ Acesse a seção **Jogar contra a IA** diretamente no painel web (ou em `http://
   - Pressione `Espaço` para pausar ou retomar e `Esc` para cancelar a seleção.
   - Efeitos sonoros sintetizados pelo navegador e feedback tático em tempo real.
 
-No [painel local](http://127.0.0.1:8766/), escolha X-Bow 3.0 ou IceBow. Em **Treinamento assistido**, escolha **Novo treino** ou selecione um experimento com checkpoints para **Retomar self-play**. Ajuste a duração e clique no botão de início. A tela acompanha a reconstrução dos replays, as épocas de imitação, as partidas de self-play e a avaliação, além de mostrar os registros e as métricas conforme são gravados.
+Abra **Cartas e decks** no menu para consultar, em uma página própria, a composição e o custo médio dos decks. Use o seletor para ver as oito cartas de um deck ou o catálogo completo do simulador. **Usar na batalha** volta ao painel com o deck selecionado.
+
+No painel local, escolha X-Bow 3.0 ou IceBow. Em **Treinamento assistido**, escolha **Novo treino** ou selecione um experimento com checkpoints para **Retomar self-play**. Ajuste a duração e clique no botão de início. A tela acompanha a reconstrução dos replays, as épocas de imitação, as partidas de self-play e a avaliação, além de mostrar os registros e as métricas conforme são gravados.
 
 O máximo do slider **Replays** acompanha a quantidade de candidatos do deck selecionado nas partições Parquet locais. O portal recalcula esse máximo quando as partições mudam. O simulador pode descartar replays durante a reconstrução.
 
 **Parar treino** solicita a parada no próximo ponto seguro. Os checkpoints já gravados ficam disponíveis. Fechar a página não encerra o treino, que pode ser acompanhado ao reabrir o painel.
 
-No self-play e na avaliação, o simulador mantém até quatro partidas em andamento e agrupa as previsões da IA no mesmo processo. O controle **Partidas por atualização** define o total de partidas antes de cada atualização PPO. Na linha de comando, use `--parallel-games` de 1 a 8 para ajustar quantas partidas avançam juntas.
+O simulador agrupa as previsões das partidas em andamento no mesmo processo. O treino PPO em CPU usa até quatro threads do PyTorch por padrão e roda até oito partidas em paralelo quando há pelo menos quatro threads. Nos demais casos, o padrão é quatro partidas em paralelo. O controle **Partidas por atualização** define o total de partidas antes de cada atualização PPO. Na linha de comando, use `--threads` para ajustar o PyTorch e `--parallel-games` de 1 a 8 para definir quantas partidas avançam juntas.
 
 Em **Arena do treino**, veja o estado do tabuleiro, as mãos, o elixir e as jogadas registrados pelo simulador. **Imitação** compara a jogada humana com a decisão do modelo no mesmo quadro e mostra como a previsão muda ao longo dos lotes. **Self-play** e **Avaliação** mostram as partidas jogadas pelo modelo. Pause, avance pela gravação ou selecione um dos três registros mais recentes de cada etapa. Os exemplos com a indicação **Demonstração com dados locais** usam replays do dataset e checkpoints já salvos.
 
@@ -71,7 +75,19 @@ A perda de jogar ou esperar corrige a probabilidade de inclusão dos quadros rea
 
 Para IceBow, use `--deck icebow` e seus caminhos correspondentes. A liga usa checkpoints anteriores, um bot de X-Bow programado e rivais de Corredor e Gigante Real. O PPO penaliza a divergência KL exata do checkpoint congelado de imitação para a política em treino sobre as ações legais. O RoyaleSim fornece o resultado e o dano às torres, enquanto os termos adicionais recompensam aquisições de alvo pela X-Bow e trocas de elixir.
 
-`selfplay.json` guarda as métricas do treino e da avaliação solicitada. `evaluation.json` guarda avaliações executadas sem treino. Para comparar BC e PPO, o programa usa os mesmos rivais, sementes e lados. `replay_validation.json` compara a imitação antes e depois do PPO nas partidas reservadas e mede a escolha da carta e o posicionamento de X-Bow, Tesla e cartas de um elixir.
+Para treinar duas IAs na mesma partida, em **Retomar PPO** de X-Bow 3.0 marque **Treinar X-Bow e a IA adversária na mesma partida**. A X-Bow continua do checkpoint selecionado e usa seu deck fixo. Uma única rede adversária alterna a cada partida entre os decks completos de Corredor 2.6, Gigante Real e Splashyard. As duas redes jogam, recebem as recompensas do próprio lado e atualizam seus pesos antes do próximo confronto. O checkpoint PPO salva as duas redes e seus otimizadores juntos após cada partida e a retomada continua da posição salva na rotação.
+
+Na linha de comando, acrescente `--coevolve` ao comando de retomada de X-Bow 3.0. `--ppo-updates` indica o número de partidas. A avaliação opcional joga `--evaluate` partidas por deck adversário com pesos congelados e alterna os lados.
+
+O treino conjunto usa a recompensa `potential` por padrão. Ela combina o resultado da partida com sinais de coroas, vida das torres e elixir na barra e nas tropas vivas. O foco da X-Bow aparece nas métricas da partida. `--reward legacy` seleciona a fórmula anterior para retomar um treino de controle.
+
+Para comparar as duas fórmulas, execute o comando abaixo com a pasta de um checkpoint conjunto. Cada modelo treinado enfrenta o oponente inicial congelado com os três decks, usando as mesmas sementes e os dois lados. Use um número par para `--evaluate`, que vale por deck e por modelo. O relatório `reward_comparison.json` registra vitórias, dano às torres e elixir desperdiçado estimado pelo simulador, além das contribuições de recompensa. As duas variantes são salvas na nova pasta de comparação.
+
+```powershell
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --coevolve --resume-ppo --output runs/calibrated/xbow_30 --bc-checkpoint runs/calibrated/xbow_30/bc.pt --ppo-updates 60 --evaluate 12 --compare-rewards runs/reward-ab
+```
+
+`selfplay.json` guarda as métricas do treino e da avaliação solicitada. Cada atualização registra o tempo de simulação (`simulation_seconds`) e de preparação e otimização do PPO (`optimization_seconds`). `evaluation.json` guarda avaliações executadas sem treino. Para comparar BC e PPO, o programa usa os mesmos rivais, sementes e lados. `replay_validation.json` compara a imitação antes e depois do PPO nas partidas reservadas e mede a escolha da carta e o posicionamento de X-Bow, Tesla e cartas de um elixir.
 
 ## Inferência local
 
