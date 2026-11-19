@@ -1,43 +1,27 @@
-"""Record and read small, local clips of the states used by training."""
+"""Share a bounded set of current training frames with the dashboard."""
 
+from collections import deque
+from contextlib import suppress
 import json
 import os
-from time import time_ns
+from pathlib import Path
+from time import monotonic
 from uuid import uuid4
 
 
 STAGES = ("replays", "bc", "ppo", "evaluation")
-KEEP_CLIPS = 3
+LIVE_FRAMES = 8
+PUBLISH_INTERVAL = 0.12
 
 
-def clip_files(folder, stage):
-    return sorted(folder.glob(f"{stage}-*.jsonl"), reverse=True)
-
-
-def clip_data(folder, stage, clip_id, known, after):
-    clips = []
-    selected = None
-    for path in clip_files(folder, stage):
+def live_data(folder, stage):
+    boards = []
+    for path in folder.glob(f"{stage}-*.json"):
         try:
-            with path.open(encoding="utf-8") as stream:
-                header = json.loads(stream.readline())
-                clips.append(header)
-                if selected is not None or (clip_id and header["id"] != clip_id):
-                    continue
-                frames, result = [], None
-                offset = after if known == header["id"] else -1
-                for line in stream:
-                    if not line.endswith("\n"):
-                        break
-                    record = json.loads(line)
-                    if "result" in record:
-                        result = record["result"]
-                    elif record["seq"] > offset:
-                        frames.append(record)
-                selected = {"header": header, "frames": frames, "result": result}
+            boards.append(json.loads(path.read_bytes()))
         except (OSError, ValueError):
             continue
-    return {"clips": clips, "clip": selected}
+    return sorted(boards, key=lambda board: board["header"].get("number", 0))
 
 
 def arena_enabled():
@@ -46,46 +30,47 @@ def arena_enabled():
 
 class ArenaCapture:
     def __init__(self, output, stage, env, **metadata):
-        self.folder = output / "arena"
-        self.stage = stage
+        folder = Path(os.environ.get("XBOW_ARENA_DIR", output / "arena-live"))
+        board_id = uuid4().hex
+        self.path = folder / f"{stage}-{board_id}.json"
+        self.temporary = self.path.with_suffix(".tmp")
         self.parser = env.action_parser
         self.cards = {card.card_id: card.name for card in env.engine.cards()}
         self.units = dict(enumerate(env.engine.unit_types()))
-        self.header = {"id": uuid4().hex, "stage": stage, "width": self.parser.nx,
+        self.header = {"id": board_id, "stage": stage, "width": self.parser.nx,
                        "height": self.parser.ny, **metadata}
+        self.frames = deque(maxlen=LIVE_FRAMES)
         self.seq = 0
         self.last_ms = None
+        self.last_publish = None
         self.example = None
-        self.stream = None
-        self.finished = False
 
     def __enter__(self):
-        self.folder.mkdir(parents=True, exist_ok=True)
-        for path in clip_files(self.folder, self.stage)[KEEP_CLIPS - 1:]:
-            try:
-                path.unlink(missing_ok=True)
-            except PermissionError:
-                pass
-        path = self.folder / f"{self.stage}-{time_ns():020d}-{self.header['id']}.jsonl"
-        self.stream = path.open("w", encoding="utf-8", buffering=1)
-        self.write(self.header)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         return self
 
     def __exit__(self, error_type, error, traceback):
-        if error_type and not self.finished:
-            self.finish({"status": "interrupted"})
-        self.stream.close()
+        self.close()
 
-    def write(self, record):
-        self.stream.write(json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n")
+    def close(self):
+        for path in (self.path, self.temporary):
+            with suppress(PermissionError):
+                path.unlink(missing_ok=True)
+        self.frames.clear()
 
     def frame(self, board, **data):
-        self.write({"seq": self.seq, **board, **data})
+        self.frames.append({"seq": self.seq, **board, **data})
         self.seq += 1
-
-    def finish(self, result):
-        self.write({"result": result})
-        self.finished = True
+        now = monotonic()
+        if self.last_publish is not None and now - self.last_publish < PUBLISH_INTERVAL:
+            return
+        snapshot = {"header": self.header, "frames": list(self.frames)}
+        with suppress(PermissionError):
+            self.temporary.write_text(
+                json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")), encoding="utf-8",
+            )
+            self.temporary.replace(self.path)
+            self.last_publish = now
 
     def action(self, action, seat, hand):
         if action == 0:
@@ -97,14 +82,14 @@ class ArenaCapture:
             x, y = self.parser.nx - 1 - x, self.parser.ny - 1 - y
         return {"kind": "card", "card": hand[slot], "x": x + .5, "y": y + .5}
 
-    def observe(self, state, actions=(0, 0), *, example_index=None, force=False):
+    def observe(self, state, actions=(0, 0), *, example_index=None):
         ms = state.tick * state.tick_ms
-        if not (force or any(actions) or self.last_ms is None or ms - self.last_ms >= 500):
+        if not (any(actions) or self.last_ms is None or ms - self.last_ms >= 500):
             return
         pitch = self.parser.pitch
         sides = [
             {"hp": player.tower_hp, "elixir": round(player.elixir_milli / 1000, 1),
-             "hand": [self.cards.get(card, "—") for card in player.hand]}
+             "hand": [self.cards.get(card, "-") for card in player.hand]}
             for player in state.players
         ]
         pieces = [

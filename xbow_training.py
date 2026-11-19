@@ -15,7 +15,7 @@ from torch import nn
 from torch.distributions import Categorical, kl_divergence
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from royaleimitate.replays import CARD_NAMES
-from xbow_arena import ArenaCapture, KEEP_CLIPS, arena_enabled
+from xbow_arena import ArenaCapture, arena_enabled
 from xbow_metrics import check_training_stop
 
 from xbow_replays import reconstruct, winning_replays
@@ -247,13 +247,8 @@ def collect_replays(env, parquet_path, deck, limit, seed, frame_store=None, vali
                      if arena_output is not None else nullcontext())
         with recording as capture:
             samples = reconstruct(env, replay, seed, capture)
-            if capture:
-                if isinstance(samples, str):
-                    capture.finish({"status": "rejected", "reason": samples})
-                else:
-                    capture.finish({"status": "accepted", "frames": len(samples.actions)})
-                    if capture.example and examples is not None:
-                        examples[replay.tag] = (replay.seat, *capture.example)
+            if capture and not isinstance(samples, str) and capture.example and examples is not None:
+                examples[replay.tag] = (replay.seat, *capture.example)
         if isinstance(samples, str):
             if is_validation:
                 raise ValueError(f"Replay reservado {replay.tag}: {samples}")
@@ -491,12 +486,11 @@ def fit_clone(env, args, device, path, frame_store=None, report=None):
             probes.append((capture, probe))
         fit_clone_epochs(policy, train_matches, val_matches, training_batches, val_batches,
                          optimizer, args, device, path, report, probes)
-        for capture, _ in probes:
-            capture.finish({"status": "finished"})
 
 
 def clone_examples(matches, examples):
     """Prefer different opening plays while keeping each comparison on a fixed board."""
+    probe_limit = 3
     distinct, repeats = {}, []
     for match in matches:
         if match.tag not in examples:
@@ -504,13 +498,13 @@ def clone_examples(matches, examples):
         seat, _, board = examples[match.tag]
         card = next(move["card"] for move in board["moves"] if move["seat"] == seat)
         if card in distinct:
-            if len(repeats) < KEEP_CLIPS:
+            if len(repeats) < probe_limit:
                 repeats.append((match, card))
         else:
             distinct[card] = (match, card)
-            if len(distinct) == KEEP_CLIPS:
+            if len(distinct) == probe_limit:
                 break
-    return (*distinct.values(), *repeats)[:KEEP_CLIPS]
+    return (*distinct.values(), *repeats)[:probe_limit]
 
 
 def clone_probe(match, index, board, seat, device, action_count):

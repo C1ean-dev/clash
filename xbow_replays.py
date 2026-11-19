@@ -237,8 +237,6 @@ def reconstruct(env, replay: WinningReplay, seed: int, capture=None) -> MatchSam
         labels.append(commands[winner])
         obs, _, _, _, _ = env.step(commands)
 
-    if capture:
-        capture.observe(env.battle_state, force=True)
     if any(pending):
         return "simulator ended before replay"
     return MatchSamples(

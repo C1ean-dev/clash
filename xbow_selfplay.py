@@ -14,11 +14,11 @@ from royalegym.opponents import PatientOpponent, PushOpponent
 from royalegym.protocol import MatchSetup
 from royaleimitate.replays import CARD_NAMES
 
-from xbow_arena import ArenaCapture, KEEP_CLIPS, arena_enabled
+from xbow_arena import ArenaCapture, arena_enabled
 from xbow_environment import ELIXIR_TRADE_WEIGHT, PPO_GAMMA, XBOW_LOCK_WEIGHT, XBowLockReward, battle_env
 from xbow_replays import SEATS
 from xbow_training import frozen_policy, load_checkpoint, optimize_ppo, save_checkpoint
-from xbow_metrics import check_training_stop, read_training_journal
+from xbow_metrics import check_training_stop, read_run_journal
 
 
 @dataclass(frozen=True)
@@ -153,6 +153,8 @@ def game_steps(env, policy, seat, seed, device, collect=False, capture=None, *,
     if scripted:
         options["mask_only"] = (SEATS[1 - seat],)
     obs, _ = env.reset(seed=seed, options=options)
+    if capture:
+        capture.observe(env.battle_state)
     players = [(seat, policy, Rollout(collect))]
     if rival_policy is not None:
         players.append((1 - seat, rival_policy, Rollout(collect)))
@@ -175,11 +177,9 @@ def game_steps(env, policy, seat, seed, device, collect=False, capture=None, *,
                      else lock_monitor.new_locks(team, previous_state, env.battle_state))
             rollout.observe(before[agent], decisions[team], reward[agent], terms, locks)
 
-    state = env.battle_state
     stats = players[0][2].stats(env, seat)
     if capture:
-        capture.observe(state, force=True)
-        capture.finish({"status": stats["result"], **stats})
+        capture.close()
     if not collect:
         return stats
     results = []
@@ -218,16 +218,17 @@ def play_wave(output, stage, policy, matches, environments, device, *,
               collect=False, collect_both=False, capture_arena=True, **metadata):
     """Advance independent matches together and batch requests for the same policy."""
     results = [None] * len(matches)
-    first_captured = max(0, len(matches) - KEEP_CLIPS) if capture_arena and arena_enabled() else len(matches)
+    show_live = capture_arena and arena_enabled()
+    capture_metadata = {**metadata, "joint": collect_both or metadata.get("joint", False)}
     with ExitStack() as stack:
         pending = {}
         for index, (match, env) in enumerate(zip(matches, environments, strict=True)):
             check_training_stop()
             capture = None
-            if index >= first_captured:
+            if show_live:
                 capture = stack.enter_context(ArenaCapture(
                     output, stage, env, rival=match.rival.name, seat=match.seat,
-                    number=match.number, **metadata,
+                    number=match.number, **capture_metadata,
                 ))
             game = game_steps(env, policy, match.seat, match.seed, device, collect, capture,
                               scripted=match.rival.policy is None, setup=match.setup,
@@ -269,7 +270,9 @@ def rollout_tensors(trajectories, device):
     trajectories.clear()
     data = []
     for column in columns:
-        data.append(torch.as_tensor(np.concatenate(column), device=device))
+        packed = column[0] if len(column) == 1 else np.concatenate(column)
+        data.append(torch.as_tensor(packed, device=device))
+        del packed
         column.clear()
     return data
 
@@ -303,7 +306,7 @@ def resume_history(output, latest):
         history = []
     update = latest["update"]
     recorded = {row["update"]: row for row in history if row["update"] <= update}
-    for event in read_training_journal(output / "progress.jsonl"):
+    for event in read_run_journal(output):
         if event.get("event") == "ppo_update" and event["done"] <= update:
             recorded[event["done"]] = event["metrics"]
     recorded[update] = latest
@@ -422,6 +425,9 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
                     sorted(assignments, key=lambda assignment: assignment[0]), 1)
             ]
             concurrent = min(parallel_games, len(matches))
+            if report_progress:
+                report_progress("ppo_match", update=update + 1, done=update, total=final_update,
+                                games=len(matches), parallel_games=concurrent)
             for match, (game, rows) in play_matches("ppo", policy, matches, collect=True, update=update + 1):
                 games.append(game)
                 chunks.append(rows)

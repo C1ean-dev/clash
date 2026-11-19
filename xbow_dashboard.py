@@ -14,10 +14,10 @@ import webbrowser
 
 from royalegym import RustEngine
 
-from xbow_dashboard_jobs import BusyError, DashboardJobs, DECKS
-from xbow_arena import STAGES, clip_data
+from xbow_dashboard_jobs import ACTIVE, BusyError, DashboardJobs, DECKS
+from xbow_arena import STAGES, live_data
 from xbow_environment import RIVAL_DECKS
-from xbow_metrics import read_training_journal
+from xbow_metrics import read_run_journal
 from xbow_replays import CARD_NAMES, DECKS as X_BOW_DECKS
 from xbow_video_catalog import VideoCatalog
 from xbow_play_session import ACTIVE_SESSIONS, DECK_LABELS, card_pt_name, list_available_models
@@ -86,7 +86,7 @@ def modified(path):
 
 def experiment(path):
     report = json_file(path / "selfplay.json")
-    events = list(read_training_journal(path / "progress.jsonl"))
+    events = list(read_run_journal(path))
     updates = {row["update"]: row for row in report.get("updates", [])
                if isinstance(row, dict) and isinstance(row.get("update"), int)}
     epochs, split, phase = [], {}, {}
@@ -151,6 +151,8 @@ def dashboard_data():
     return {
         "runs": runs, "job": JOBS.current(),
         "joint_training": "shared_match",
+        "continuous_training": True,
+        "continuous_parallel": True,
         "parts": inventory["parts"], "inventory": inventory,
         "refreshed": datetime.now(timezone.utc).isoformat(),
     }
@@ -202,24 +204,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return query.get(name, [default])[0]
 
         root = RUNS.resolve()
-        stage, deck = param("stage"), param("deck")
+        stage, deck = param("phase"), param("deck")
         run_id = param("run")
         try:
             run = (root / run_id).resolve() if run_id else None
-            if (stage not in STAGES or deck not in DECKS or
+            if (param("stage") != "live" or stage not in STAGES or deck not in DECKS or
                     (run and (not run.is_relative_to(root) or run.name != deck))):
                 raise ValueError
-            after = int(param("after", "-1"))
         except (ValueError, OSError):
             self.reply_json({"error": "Seleção de arena inválida."}, 400)
             return
-        clip_id, known = param("clip"), param("known")
-        data = clip_data(run / "arena", stage, clip_id, known, after) if run else {"clips": [], "clip": None}
-        preview = not data["clips"]
-        if preview:
-            folder = root / ".arena-preview" / deck / "arena"
-            data = clip_data(folder, stage, clip_id, known, after)
-        self.reply_json({**data, "preview": preview}, 200)
+        job = JOBS.current(with_log=False)
+        active = bool(run and job and job["status"] in ACTIVE and job["run_id"] == run_id)
+        boards = live_data(JOBS.store / job["id"] / "arena-live", stage) if active else []
+        self.reply_json({"active": active, "boards": boards}, 200)
 
     def do_POST(self):
         route = urlsplit(self.path).path

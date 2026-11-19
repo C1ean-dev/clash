@@ -1,7 +1,7 @@
 "use strict";
 
 (() => {
-  // The replay viewer and the playable battle share the arena artwork and spell drawing.
+  // The live training view and the playable battle share the arena artwork and spell drawing.
   const colors = ["#6ed4e1", "#f89078"];
   const reducedMotion = matchMedia("(prefers-reduced-motion: reduce)").matches;
   // Tile-based geometry and speed from the bundled RoyaleSim card table and tick rate.
@@ -433,15 +433,11 @@
 
 (() => {
   const el = id => document.getElementById(`arena-${id}`);
-  const board = el("board");
-  if (!board) return;
-  const {colors: tones, reducedMotion, skin, cardKey, portraitPosition, spellName, spellCast, castVisible,
-    createRenderer} = window.battleArt;
-  const {ctx, begin, ring, drawPieces, paintSpellArea, drawCastArea, drawCast, drawCardPreview} =
-    createRenderer(board, () => draw());
-  const video = el("replay-video");
-  const recordings = new Map();
-  const tabs = [...document.querySelectorAll("[data-view-stage]")];
+  if (!el("live")) return;
+  const {colors: tones, cardKey, spellCast, castVisible, createRenderer} = window.battleArt;
+  const liveTiles = new Map();
+  const trendCards = [...document.querySelectorAll("[data-arena-model]")];
+  const trendWindow = 20;
   const rivals = { bc: "Imitação", other_bc: "Imitação do outro deck", scripted: "X-Bow programado",
     hog_push: "Corredor", rg_patient: "Gigante Real", random: "Aleatório",
     hog_26: "Corredor 2.6", royal_giant: "Gigante Real", splashyard: "Splashyard" };
@@ -455,38 +451,13 @@
     angrybarbarians: "Bárbaros de Elite", goblins: "Goblins", valkyrie: "Valquíria",
     balloon: "Balão", infernotower: "Torre Inferno", bats: "Morcegos", miner: "Mineiro",
     mortar: "Morteiro", witch: "Bruxa"};
-  const replayErrors = { "ability unavailable or ambiguous": "habilidade indisponível ou ambígua",
-    "card not in hand": "a carta registrada não estava na mão",
-    "play refused by engine": "jogada recusada pelo simulador",
-    "simulator ended before replay": "a simulação terminou antes da última jogada",
-    "simulator refused replay setup": "configuração do replay recusada pelo simulador" };
   const name = card => cards[cardKey(card)] || card;
-  const safe = value => String(value ?? "").replace(/[&<>"']/g, c =>
-    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c]);
   const percent = new Intl.NumberFormat("pt-BR", { style: "percent", maximumFractionDigits: 2 });
   const decimal = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 3 });
   const signedPoints = new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 2, signDisplay: "exceptZero"});
-  const comparisonStepMs = 1350;
-  let context = { deck: "xbow_30", run: "", active: false, phase: "replays" };
-  let stage = "replays";
-  let follow = true;
-  let pinned = "";
+  let context = {};
   let generation = 0;
-  let clip = null;
-  let frames = [];
-  let index = 0;
-  let playing = false;
-  let anchor = 0;
-  let position = 0;
-  let demo = false;
   let requesting = false;
-  let compareOpen = false;
-  let videoTag = "";
-  let playRequest = null;
-  let videoBlocked = false;
-  let displayedFrame = null;
-  let previewFrame = 0;
-  let previewProgress = 1;
 
   function clock(ms) {
     const seconds = Math.floor(ms / 1000);
@@ -495,6 +466,117 @@
 
   function rival(name) {
     return rivals[name] || name?.replace(/^snapshot_/, "Versão anterior ") || "Rival";
+  }
+
+  function winSummary(rows, model) {
+    const tally = rows.reduce((sum, row) => {
+      const result = model === "rival" ? row.free : row;
+      sum.games += result.games;
+      sum.wins += result.wins;
+      return sum;
+    }, { games: 0, wins: 0 });
+    return { ...tally, rate: tally.games ? tally.wins / tally.games : null };
+  }
+
+  function renderTrends(live) {
+    const history = (live?.updates || []).filter(row => row.games > 0 && row.free?.games > 0).slice(-80)
+      .flatMap(row => row.match_results ? row.match_results.map(result => ({
+        update: row.update, games: 1, wins: Number(result === "win"),
+        free: {update: row.free.update, games: 1, wins: Number(result === "loss")},
+      })) : [row]).slice(-80);
+    const recent = history.slice(-trendWindow);
+    const previous = history.length >= trendWindow * 2 ? history.slice(-trendWindow * 2, -trendWindow) : [];
+    el("live-sample").textContent = recent.length
+      ? `Vitórias no treino conjunto · últimas ${recent.length} partidas${previous.length ? " e variação ante as 20 anteriores" : ""}`
+      : "Aguardando partidas do treino conjunto";
+    for (const card of trendCards) {
+      const model = card.dataset.arenaModel;
+      const current = winSummary(recent, model);
+      const before = winSummary(previous, model);
+      const delta = card.querySelector("[data-delta]");
+      card.querySelector("[data-rate]").textContent = current.rate === null ? "—" : percent.format(current.rate);
+      delta.textContent = before.rate === null ? "" : `${signedPoints.format(100 * (current.rate - before.rate))} p.p.`;
+      delta.dataset.direction = current.rate > before.rate ? "up" : current.rate < before.rate ? "down" : "flat";
+      card.querySelector("[data-record]").textContent = current.games
+        ? `${current.wins} de ${current.games} vitórias · atualizações até ${model === "rival" ? recent.at(-1).free.update : recent.at(-1).update}`
+        : "Taxa de vitórias indisponível";
+      const graph = card.querySelector("canvas"), paint = graph.getContext("2d");
+      paint.clearRect(0, 0, graph.width, graph.height);
+      if (history.length < 2) continue;
+      paint.strokeStyle = "#2d3a49";
+      paint.beginPath(); paint.moveTo(0, graph.height / 2); paint.lineTo(graph.width, graph.height / 2); paint.stroke();
+      paint.strokeStyle = tones[model === "rival" ? 1 : 0];
+      paint.lineWidth = 2;
+      paint.beginPath();
+      history.forEach((_, i) => {
+        const rate = winSummary(history.slice(Math.max(0, i - trendWindow + 1), i + 1), model).rate;
+        const x = 2 + i * (graph.width - 4) / (history.length - 1), y = 2 + (1 - rate) * (graph.height - 4);
+        if (i === 0) paint.moveTo(x, y); else paint.lineTo(x, y);
+      });
+      paint.stroke();
+    }
+  }
+
+  function paintLiveBoard(tile) {
+    const { header, frames: snapshots } = tile.snapshot;
+    const frame = snapshots.at(-1);
+    const renderer = tile.renderer;
+    if (!frame || !renderer.begin(header)) return;
+    const casts = snapshots.flatMap(snapshot => snapshot.moves.map(move => spellCast({ ...move, ms: snapshot.ms },
+      { arena: header, pieces: snapshot.pieces }))).filter(cast => cast && castVisible(cast, frame.ms));
+    for (const cast of casts) renderer.drawCastArea(cast, frame.ms, header.height);
+    renderer.drawPieces(frame.pieces, header.height, piece => [piece[3], piece[4]]);
+    for (const cast of casts) renderer.drawCast(cast, frame.ms, header.height);
+  }
+
+  function renderLive({active, boards}) {
+    const ids = new Set(boards.map(board => board.header.id));
+    for (const [id, tile] of liveTiles) {
+      if (ids.has(id)) continue;
+      tile.card.remove();
+      liveTiles.delete(id);
+    }
+    for (const snapshot of boards) {
+      const { header, frames: snapshots } = snapshot;
+      let tile = liveTiles.get(header.id);
+      if (!tile) {
+        const card = document.createElement("article");
+        card.className = "arena-live-tile";
+        card.innerHTML = `<h4></h4><small></small><div class="arena-video"><canvas role="img"></canvas><time>0:00</time></div>
+          <div class="arena-live-teams"><span></span><span></span></div>`;
+        const canvas = card.querySelector("canvas");
+        const title = label(header);
+        card.querySelector("h4").textContent = title;
+        canvas.setAttribute("aria-label", title);
+        tile = { card, snapshot, renderer: createRenderer(canvas, () => paintLiveBoard(tile)) };
+        liveTiles.set(header.id, tile);
+        el("live-grid").append(card);
+      }
+      const oldFrame = tile.snapshot.frames.at(-1);
+      const frame = snapshots.at(-1);
+      const last = snapshots.findLast(item => item.moves.length)?.moves.at(-1);
+      const prediction = frame?.comparison?.model;
+      const current = prediction ? `Modelo · ${prediction.card ? name(prediction.card) : "Esperar"}`
+        : last?.card ? `Ao vivo · ${name(last.card)}` : "Ao vivo";
+      tile.card.querySelector("small").textContent = current;
+      tile.card.querySelector("time").textContent = frame ? clock(frame.ms) : "0:00";
+      tile.card.querySelectorAll(".arena-live-teams span").forEach((side, seat) => {
+        const own = header.seat === seat;
+        const teamName = header.joint ? (own ? "X-Bow 3.0" : "Rival Live") : (own ? "Modelo" : "Rival");
+        side.textContent = frame ? `${teamName} · ${decimal.format(frame.sides[seat].elixir)}` : teamName;
+        side.style.setProperty("--side-color", tones[seat]);
+      });
+      tile.snapshot = snapshot;
+      if (frame?.seq !== oldFrame?.seq || !tile.painted) {
+        paintLiveBoard(tile);
+        tile.painted = Boolean(frame);
+      }
+    }
+    const running = boards.length;
+    el("source").textContent = active ? "Transmissão ao vivo" : "Nenhum treino em andamento";
+    el("live-status").textContent = active ? `${context.detail || "Preparando o treino"}${running ? ` · ${running} ao vivo` : ""}` : "";
+    el("live-empty").hidden = Boolean(boards.length);
+    el("live-empty").textContent = active ? "Aguardando os tabuleiros desta etapa." : "Nenhum treino em andamento. Inicie um treino no painel para acompanhar as partidas.";
   }
 
   function label(header) {
@@ -507,511 +589,41 @@
     return [...parts, rival(header.rival)].join(" · ");
   }
 
-  function team(seat) {
-    if (stage === "replays" || stage === "bc") return seat === clip.header.seat ? "Jogador do deck" : "Adversário";
-    return seat === clip.header.seat ? "IA" : rival(clip.header.rival);
-  }
-
-  function actionText(action) {
-    if (action.kind === "wait") return "Esperar";
-    if (action.kind === "ability") return "Ativar habilidade";
-    return `${name(action.card)} · casa ${Math.floor(action.x) + 1}, ${Math.floor(action.y) + 1}`;
-  }
-
-  function resultText(result) {
-    if (!result) return "";
-    switch (result.status) {
-      case "accepted": return `Replay aceito · ${result.frames} quadros de decisão extraídos`;
-      case "rejected": return `Replay descartado · ${replayErrors[result.reason] || result.reason}`;
-      case "win": case "loss": case "draw": {
-        const outcomes = { win: "Vitória da IA", loss: "Derrota da IA", draw: "Empate" };
-        return `${outcomes[result.status]} · ${result.locks} conexões de X-Bow · recompensa ${decimal.format(result.reward)}`;
-      }
-      case "interrupted": return "Gravação interrompida";
-      default: return "";
-    }
-  }
-
-  function handCard(card) {
-    const [glyph, tint, portrait] = skin(card);
-    const image = portrait === undefined ? "" : ` data-portrait style="background-position:${portraitPosition(portrait)}"`;
-    const label = safe(name(card));
-    return `<span class="arena-hand-card" title="${label}" style="--card-tone:${tint}">
-      <span class="arena-card-icon"${image} aria-hidden="true">${safe(glyph)}</span>
-      <span class="arena-card-label">${label}</span>
-    </span>`;
-  }
-
-  function probabilityRow(label, value, previous, teamClass) {
-    const delta = Number.isFinite(previous) ? `${signedPoints.format((value - previous) * 100)} p.p. desde o registro anterior` : "";
-    const fill = Math.max(0, Math.min(100, value * 100));
-    return `<div class="arena-probability ${teamClass}">
-      <div><span>${label}</span><strong>${percent.format(value)}</strong></div>
-      <div class="arena-probability-track" aria-hidden="true"><i style="width:${fill}%"></i></div>
-      ${delta ? `<small>${delta}</small>` : ""}
-    </div>`;
-  }
-
-  function renderDecision(comparison) {
-    const title = comparison.epoch ? `Época ${comparison.epoch} · lote ${comparison.batch}/${comparison.batches}`
-      : "Decisão no replay";
-    const previous = frames[index - 1]?.comparison;
-    const model = comparison.model.kind === "wait" ? `Esperar · ${percent.format(1 - comparison.play)}`
-      : actionText(comparison.model);
-    const record = context.active && !demo && !pinned ? "Acompanhando os lotes" : `Registro ${index + 1} de ${frames.length}`;
-    el("decision").innerHTML = `<div class="arena-decision-head"><h3>${title}</h3><small>${record}</small></div>
-      <div class="arena-decision-choices">
-        <div class="human"><small>Jogador</small><strong>${safe(actionText(comparison.human))}</strong></div>
-        <div class="prediction"><small>Modelo</small><strong>${safe(model)}</strong></div>
-      </div>
-      ${comparison.alternative ? `<small>Se escolhesse jogar: ${safe(actionText(comparison.alternative))}</small>` : ""}
-      <div class="arena-probabilities">
-        ${probabilityRow("Chance de jogar", comparison.play, previous?.play, "prediction")}
-        ${probabilityRow("Chance da jogada registrada", comparison.target, previous?.target, "human")}
-      </div>
-      <small>${comparison.exact ? "Mesma decisão" : "Decisão diferente"}${comparison.loss != null
-        ? ` · perda do lote ${decimal.format(comparison.loss)}` : ""}</small>`;
-  }
-
-  function renderFrame() {
-    const frame = frames[index];
-    if (!frame) return;
-    const comparison = frame.comparison;
-    el("clock").textContent = comparison ? `Quadro ${clock(frame.ms)}` : clock(frame.ms);
-    el("seek").max = frames.length - 1;
-    el("seek").value = index;
-    el("seek").setAttribute("aria-label", comparison ? "Registro de imitação" : "Posição na gravação");
-    el("seek").setAttribute("aria-valuetext", frame.comparison?.epoch
-      ? `Época ${frame.comparison.epoch}, lote ${frame.comparison.batch}` : clock(frame.ms));
-    el("play").textContent = playing ? "Pausar" : stage === "bc" ? "Reproduzir histórico" :
-      index === frames.length - 1 ? "Rever" : "Reproduzir";
-    el("play").hidden = stage === "bc" && frames.length < 2;
-    el("preview").hidden = !comparison;
-    el("speed").hidden = stage === "bc";
-    el("teams").innerHTML = frame.sides.map((side, seat) =>
-      `<div class="arena-team" style="--team-color:${tones[seat]};--elixir:${Math.min(10, Math.max(0, side.elixir)) * 10}%">
-        <div class="arena-team-head"><strong>${safe(team(seat))}</strong><span>${decimal.format(side.elixir)}/10 elixir</span></div>
-        <div class="arena-elixir" aria-hidden="true"></div>
-        <small>Torres · ${side.hp.map(value => Math.max(0, value)).join(" / ")} PV</small>
-        <div class="arena-hand" role="group" aria-label="Mão de ${safe(team(seat))}">${side.hand.map(handCard).join("")}</div>
-      </div>`).reverse().join("");
-    el("decision").hidden = !comparison;
-    el("moves-box").hidden = Boolean(comparison);
-    if (comparison) {
-      renderDecision(comparison);
-    } else {
-      const moves = [];
-      for (let cursor = index; cursor >= 0 && moves.length < 6; cursor -= 1) {
-        for (const move of frames[cursor].moves) moves.push({ ...move, ms: frames[cursor].ms });
-      }
-      el("moves").innerHTML = moves.slice(0, 6).map(move =>
-        `<li class="arena-move" style="--team-color:${tones[move.seat]}"><span>
-        <strong>${safe(team(move.seat))}</strong> · ${safe(actionText(move))}</span><time>${clock(move.ms)}</time></li>`).join("");
-      if (!moves.length) el("moves").textContent = "Aguardando a primeira jogada.";
-    }
-    const result = index === frames.length - 1 ? resultText(clip.result) : "";
-    el("result").textContent = result;
-    el("result").hidden = !result;
-  }
-
-  function replayCasts(time) {
-    const casts = [];
-    for (let cursor = index; cursor >= 0; cursor -= 1) {
-      const frame = frames[cursor];
-      // Both spell animations, including their fading areas, take less than four seconds.
-      if (time - frame.ms >= 4000) break;
-      for (const move of frame.moves) {
-        const cast = spellCast({...move, ms: frame.ms}, {arena: clip.header, pieces: frame.pieces});
-        if (cast && castVisible(cast, time)) casts.push(cast);
-      }
-    }
-    return casts.reverse();
-  }
-
-  function draw(ratio = 0) {
-    const frame = frames[index];
-    if (!frame || !begin(clip.header)) return;
-    const {height} = clip.header;
-    const following = frames[index + 1];
-    const time = frame.ms + (following ? (following.ms - frame.ms) * ratio : 0);
-    const casts = frame.comparison ? [] : replayCasts(time);
-    for (const cast of casts) drawCastArea(cast, time, height);
-
-    function compareArea(move, color) {
-      const card = spellName(move.card);
-      if (move.kind === "card" && card) {
-        paintSpellArea(card, move.x, move.y, height, clip.header.seat === 0 ? 1 : -1, .95, true, color);
-      }
-    }
-    const comparison = frame.comparison;
-    if (comparison) {
-      compareArea(comparison.human, "#ffe194");
-      if (!comparison.exact) compareArea(comparison.model, "#d2b4ff");
-    }
-
-    const next = new Map(ratio > 0 ? following?.pieces.map(piece => [piece[0], piece]) : []);
-    drawPieces(frame.pieces, height, piece => {
-      const later = next.get(piece[0]);
-      return later
-        ? [piece[3] + (later[3] - piece[3]) * ratio, piece[4] + (later[4] - piece[4]) * ratio]
-        : [piece[3], piece[4]];
-    });
-    for (const cast of casts) drawCast(cast, time, height);
-
-    function mark(move, color, markLabel) {
-      if (move.kind !== "card") return;
-      const y = height - move.y;
-      ctx.strokeStyle = color;
-      ctx.lineWidth = .18;
-      ctx.strokeRect(move.x - .62, y - .62, 1.24, 1.24);
-      ctx.fillStyle = "#14232b";
-      const labelX = Math.max(1.25, Math.min(clip.header.width - 1.25, move.x));
-      const labelY = y + 1.44 > height ? y - 1.44 : y + .64;
-      ctx.fillRect(labelX - 1.25, labelY, 2.5, .8);
-      ctx.fillStyle = color;
-      ctx.font = "bold .5px system-ui";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(markLabel, labelX, labelY + .4);
-    }
-    if (comparison) {
-      function previewAction(move, color, label) {
-        if (move.kind !== "card") return;
-        const cast = spellCast({...move, seat: clip.header.seat, ms: 0},
-          {arena: clip.header, pieces: frame.pieces});
-        const y = height - move.y;
-        if (cast && previewProgress < 1) {
-          drawCast(cast, previewProgress * (cast.duration + cast.rule.fadeMs * .55), height);
-        } else {
-          drawCardPreview(move.card, move.x, y, .32 + .27 * previewProgress, color);
-          if (previewProgress < 1) {
-            ctx.save();
-            ctx.globalAlpha = 1 - previewProgress;
-            ctx.lineWidth = .1;
-            ring(move.x, y, .6 + .55 * previewProgress, color);
-            ctx.restore();
-          }
-        }
-        mark(move, color, label);
-      }
-      previewAction(comparison.human, "#ffe194", comparison.exact ? "AMBOS" : "JOGADOR");
-      if (!comparison.exact) previewAction(comparison.model, "#d2b4ff", "MODELO");
-    } else {
-      for (const move of frame.moves) {
-        if (spellName(move.card)) continue;
-        const actor = move.seat === clip.header.seat ? (stage === "replays" ? "JOGADOR" : "IA") : "RIVAL";
-        mark(move, tones[move.seat], actor);
-      }
-    }
-  }
-
-  function previewDecision() {
-    cancelAnimationFrame(previewFrame);
-    previewFrame = 0;
-    previewProgress = 1;
-    const frame = frames[index];
-    if (!frame?.comparison || reducedMotion) {
-      draw();
-      return;
-    }
-    const started = performance.now();
-    previewProgress = 0;
-    function animatePreview(now) {
-      previewFrame = 0;
-      if (frames[index] !== frame) return;
-      previewProgress = Math.max(0, Math.min(1, (now - started) / 1050));
-      draw();
-      if (previewProgress < 1) previewFrame = requestAnimationFrame(animatePreview);
-    }
-    previewFrame = requestAnimationFrame(animatePreview);
-  }
-
-  function showIndex(next) {
-    index = next;
-    renderFrame();
-    if (frames[index] !== displayedFrame) {
-      displayedFrame = frames[index];
-      previewDecision();
-    } else {
-      draw();
-    }
-  }
-
-  function renderComparison() {
-    const tag = stage === "replays" && frames.length ? clip.header.replay : "";
-    const visible = Boolean(tag && compareOpen);
-    el("compare").hidden = !tag;
-    el("compare").setAttribute("aria-expanded", String(visible));
-    el("compare").textContent = visible ? "Fechar comparação" : "Comparar com vídeo";
-    el("comparison").hidden = !visible;
-    el("reconstruction-title").hidden = !visible;
-    el("content").classList.toggle("comparing", visible);
-    const activeTag = visible ? tag : "";
-    const recording = recordings.get(activeTag);
-    if (activeTag !== videoTag || recording?.url !== (video.getAttribute("src") || undefined)) {
-      videoTag = activeTag;
-      video.pause();
-      el("align-video").disabled = true;
-      el("video-status").textContent = "";
-      videoBlocked = false;
-      if (recording) {
-        video.src = recording.url;
-      } else {
-        video.removeAttribute("src");
-        video.load();
-      }
-    }
-    video.hidden = !recording;
-    el("video-placeholder").hidden = Boolean(recording);
-  }
-
-  function syncVideo(ms, force = false) {
-    const recording = recordings.get(videoTag);
-    if (!recording || video.readyState < 1 || !Number.isFinite(video.duration)) return;
-    const target = ms / 1000 + recording.offset;
-    const current = Math.max(0, Math.min(video.duration, target));
-    const speed = Number(el("speed").value);
-    if (force || Math.abs(video.currentTime - current) > Math.max(.3, speed / 12)) {
-      video.currentTime = current;
-    }
-    if (!playing || target < 0 || target >= video.duration) {
-      video.pause();
-      return;
-    }
-    if (video.playbackRate !== speed) video.playbackRate = speed;
-    if (video.paused && !playRequest && !videoBlocked) {
-      const requestedTag = videoTag;
-      playRequest = video.play().catch(() => {
-        if (requestedTag === videoTag && playing) {
-          videoBlocked = true;
-          el("video-status").textContent = "O navegador não conseguiu iniciar o vídeo junto com o replay.";
-        }
-      }).finally(() => { playRequest = null; });
-    }
-  }
-
-  function animate(now) {
-    if (!playing) return;
-    if (stage === "bc") {
-      position += (now - anchor) / comparisonStepMs;
-      anchor = now;
-      const cursor = Math.min(frames.length - 1, Math.floor(position));
-      if (cursor === frames.length - 1) playing = false;
-      if (index !== cursor || !playing) showIndex(cursor);
-      if (playing) requestAnimationFrame(animate);
-      return;
-    }
-    const speed = context.active && !demo && !pinned
-      ? Math.max(8, (frames.at(-1).ms - position) / 950) : Number(el("speed").value);
-    position += (now - anchor) * speed;
-    anchor = now;
-    let cursor = index;
-    while (cursor < frames.length - 1 && frames[cursor + 1].ms <= position) cursor += 1;
-    if (cursor === frames.length - 1) {
-      playing = false;
-      showIndex(cursor);
-      syncVideo(frames[cursor].ms, true);
-      return;
-    }
-    if (index !== cursor) showIndex(cursor);
-    const time = frames[cursor].ms;
-    draw(Math.max(0, (position - time) / Math.max(1, frames[cursor + 1].ms - time)));
-    syncVideo(position);
-    requestAnimationFrame(animate);
-  }
-
-  function play() {
-    if (playing) {
-      playing = false;
-      if (videoTag) video.pause();
-      renderFrame();
-      return;
-    }
-    if (frames.length < 2) return;
-    if (index === frames.length - 1) index = 0;
-    position = stage === "bc" ? index : frames[index].ms;
-    anchor = performance.now();
-    playing = true;
-    videoBlocked = false;
-    syncVideo(position, true);
-    showIndex(index);
-    requestAnimationFrame(animate);
-  }
-
-  function updateButtons() {
-    for (const tab of tabs) tab.setAttribute("aria-pressed", String(tab.dataset.viewStage === stage));
-    el("follow").disabled = follow && !pinned;
-  }
-
-  function clear() {
-    generation += 1;
-    pinned = "";
-    clip = null;
-    frames = [];
-    index = 0;
-    playing = false;
-    displayedFrame = null;
-    cancelAnimationFrame(previewFrame);
-    previewFrame = 0;
-    previewProgress = 1;
-    demo = false;
-    compareOpen = false;
-    el("content").hidden = true;
-    el("empty").hidden = false;
-    el("empty").textContent = "Carregando os dados da arena…";
-    renderComparison();
-    updateButtons();
-  }
-
   async function poll() {
-    if (requesting) return;
+    if (requesting || !context.active) return;
     requesting = true;
     const version = generation;
-    const params = new URLSearchParams({ deck: context.deck, run: context.run, stage, clip: pinned,
-      known: clip?.header.id || "", after: frames.at(-1)?.seq ?? -1 });
+    const {deck, run, phase} = context;
+    const params = new URLSearchParams({stage: "live", deck, run, phase});
     try {
-      const response = await fetch(`/api/arena?${params}`, { signal: AbortSignal.timeout(4000) });
+      const response = await fetch('/api/arena?' + params, {signal: AbortSignal.timeout(4000)});
       if (!response.ok) throw new Error();
       const data = await response.json();
-      if (version !== generation) return;
-      const { clip: incoming, preview } = data;
-      if (incoming || !frames.length) demo = preview;
-      const source = demo ? "Demonstração com dados locais" :
-        context.active ? "Partidas e decisões capturadas durante o treino" : "Gravações do experimento";
-      el("source").textContent = source;
-      // A recording already open in the browser stays playable after rotation on disk.
-      if (!incoming && !frames.length) {
-        el("empty").textContent = "Aguardando o primeiro quadro desta etapa.";
-        return;
-      }
-      if (incoming) {
-        const changed = !clip || clip.header.id !== incoming.header.id;
-        if (changed) {
-          playing = false;
-          frames = [];
-          index = 0;
-        }
-        clip = incoming;
-        const previousCount = frames.length;
-        frames.push(...incoming.frames);
-        const live = context.active && !demo && !pinned;
-        const selectedIndex = stage === "bc" && (!pinned || changed) ? frames.length - 1 : index;
-        if (frames.length && !playing) showIndex(Math.max(0, selectedIndex));
-        if (changed && demo && stage !== "bc" && frames.length > 1) play();
-        if (live && stage !== "bc" && !playing && index < frames.length - 1 && frames.length > previousCount) play();
-      }
-      el("content").hidden = !frames.length;
-      el("empty").hidden = Boolean(frames.length);
-      renderComparison();
-      if (!frames.length) return;
-      if (!playing) draw();
-      el("context").textContent = stage === "bc" ?
-        (demo ? "Previsão de um checkpoint salvo neste quadro." :
-          "O quadro do replay é fixo. O histórico mostra como a previsão muda a cada registro.") : label(clip.header);
-      const choices = [...data.clips];
-      if (!choices.some(item => item.id === clip.header.id)) choices.push(clip.header);
-      const key = choices.map(item => item.id).join(" ");
-      if (el("list").dataset.items !== key) {
-        el("list").replaceChildren(...choices.map(item => new Option(label(item), item.id)));
-        el("list").dataset.items = key;
-      }
-      el("list").value = clip.header.id;
-      el("list-label").hidden = choices.length < 2;
+      if (version === generation) renderLive(data);
     } catch {
-      if (version === generation && !frames.length) el("empty").textContent = "A arena está aguardando conexão com o painel.";
+      if (version === generation) {
+        renderLive({active: true, boards: []});
+        el("live-status").textContent = "Aguardando conexão com o painel";
+      }
     } finally {
       requesting = false;
       if (version !== generation) void poll();
     }
   }
 
-  function applyStage(next, tracking) {
-    if (stage === next && follow === tracking && !pinned) return;
-    stage = next;
-    follow = tracking;
-    clear();
-    void poll();
-  }
-
   window.trainingArena = {
     update(selection) {
-      const changed = context.run !== selection.run || context.deck !== selection.deck;
+      const changed = context.run !== selection.run || context.phase !== selection.phase ||
+        context.active !== selection.active;
       context = selection;
-      const next = follow && (!pinned || changed) ? context.phase : stage;
-      if (changed || next !== stage) {
-        stage = next;
-        clear();
+      renderTrends(context);
+      if (changed) {
+        generation += 1;
+        renderLive({active: context.active, boards: []});
         void poll();
       }
     },
   };
-  for (const tab of tabs) tab.addEventListener("click", () => applyStage(tab.dataset.viewStage, false));
-  el("follow").addEventListener("click", () => applyStage(context.phase, true));
-  el("compare").addEventListener("click", () => {
-    compareOpen = !compareOpen;
-    if (compareOpen) {
-      pinned = clip.header.id;
-      playing = false;
-      el("speed").value = "1";
-      updateButtons();
-      renderFrame();
-    }
-    renderComparison();
-    draw();
-  });
-  el("video-file").addEventListener("change", event => {
-    const file = event.target.files[0];
-    event.target.value = "";
-    if (!file || !videoTag) return;
-    playing = false;
-    renderFrame();
-    const previous = recordings.get(videoTag);
-    if (previous) URL.revokeObjectURL(previous.url);
-    recordings.set(videoTag, { url: URL.createObjectURL(file), name: file.name, offset: 0 });
-    renderComparison();
-  });
-  video.addEventListener("loadedmetadata", () => {
-    if (!videoTag || !frames[index]) return;
-    el("align-video").disabled = !Number.isFinite(video.duration);
-    el("video-status").textContent = recordings.get(videoTag).name;
-    syncVideo(frames[index].ms, true);
-  });
-  video.addEventListener("error", () => {
-    if (!videoTag) return;
-    el("align-video").disabled = true;
-    el("video-status").textContent = "O navegador não conseguiu abrir este arquivo. Tente MP4 ou WebM.";
-  });
-  el("align-video").addEventListener("click", () => {
-    const recording = recordings.get(videoTag);
-    if (!recording || !frames[index] || video.readyState < 1) return;
-    playing = false;
-    video.pause();
-    recording.offset = video.currentTime - frames[index].ms / 1000;
-    el("video-status").textContent = `Vídeo alinhado com o replay em ${clock(frames[index].ms)}.`;
-    renderFrame();
-  });
-  el("play").addEventListener("click", () => {
-    pinned = clip.header.id;
-    updateButtons();
-    play();
-  });
-  el("preview").addEventListener("click", previewDecision);
-  el("seek").addEventListener("input", event => {
-    playing = false;
-    pinned = clip.header.id;
-    updateButtons();
-    showIndex(Number(event.target.value));
-    syncVideo(frames[index].ms, true);
-  });
-  el("list").addEventListener("change", event => {
-    const pick = event.target.value;
-    clear();
-    pinned = pick;
-    updateButtons();
-    void poll();
-  });
-  new ResizeObserver(() => draw()).observe(board);
-  updateButtons();
-  void poll();
-  setInterval(poll, 1150);
+  new ResizeObserver(() => liveTiles.forEach(paintLiveBoard)).observe(el("live-grid"));
+  setInterval(poll, 900);
 })();

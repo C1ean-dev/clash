@@ -34,6 +34,8 @@ def main():
     parser.add_argument("--coevolve", action="store_true",
                         help="Atualiza X-Bow 3.0 e o rival após cada confronto com decks fixos")
     parser.add_argument("--ppo-updates", type=int, default=0)
+    parser.add_argument("--continuous", action="store_true",
+                        help="Treina os dois modelos até uma parada solicitada")
     parser.add_argument("--reward", choices=JOINT_REWARD_PROFILES,
                         help="Recompensa do treino conjunto (padrão: potential)")
     parser.add_argument("--compare-rewards", type=Path, metavar="PASTA",
@@ -57,16 +59,18 @@ def main():
         return
     if not args.parquet_path and not args.bc_checkpoint:
         parser.error("informe --parquet-path ou --bc-checkpoint")
-    if not (args.parquet_path or args.ppo_updates or args.evaluate):
+    if not (args.parquet_path or args.ppo_updates or args.evaluate or args.continuous):
         parser.error("selecione treino com --ppo-updates ou avaliacao com --evaluate")
     if args.parquet_path and args.bc_checkpoint and not args.replay_eval:
         parser.error("--parquet-path treina um BC novo; --bc-checkpoint carrega um BC existente")
     if args.holdout_checkpoint and (not args.parquet_path or args.replay_eval):
         parser.error("--holdout-checkpoint requer treino de imitação com --parquet-path")
-    if args.resume_ppo and (not args.bc_checkpoint or not args.ppo_updates):
+    if args.resume_ppo and (not args.bc_checkpoint or not (args.ppo_updates or args.continuous)):
         parser.error("--resume-ppo requer --bc-checkpoint e --ppo-updates")
     if args.coevolve and (not args.resume_ppo or args.deck != "xbow_30" or args.parquet_path):
         parser.error("--coevolve requer --resume-ppo com o deck xbow_30")
+    if args.continuous and (not args.coevolve or args.ppo_updates or args.evaluate or args.compare_rewards):
+        parser.error("--continuous requer --coevolve e executa o treino sem limite de partidas")
     if (args.reward or args.compare_rewards) and not args.coevolve:
         parser.error("--reward e --compare-rewards requerem --coevolve")
     if args.compare_rewards:
@@ -100,7 +104,7 @@ def main():
             torch.set_num_threads(min(4, os.cpu_count() or 1))
         compare_rewards(args, device, bc_path, output)
         return
-    with training_journal(output, args.deck) as report:
+    with training_journal(output, args.deck, continuous=args.continuous) as report:
         run(args, device, output, bc_path, report)
 
 
@@ -121,7 +125,7 @@ def run(args, device, output, bc_path, report):
         finally:
             env.close()
         print(f"Checkpoint BC: {bc_path}", flush=True)
-    if args.ppo_updates or args.evaluate:
+    if args.ppo_updates or args.evaluate or args.continuous:
         check_training_stop()
         if args.threads is None and device == "cpu":
             torch.set_num_threads(min(4, os.cpu_count() or 1))

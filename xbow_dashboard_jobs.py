@@ -1,6 +1,6 @@
 """Run one local training session at a time, with a persistent log and stop request."""
 
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from datetime import datetime, timezone
 import json
 import os
@@ -253,12 +253,20 @@ class DashboardJobs:
                 raise ValueError(f"Escolha entre 2 e {available} replays candidatos para este deck.")
             limits.update(matches=(2, available), epochs=(1, 30))
         params = {}
+        continuous = request.get("continuous", False)
+        if type(continuous) is not bool or (continuous and not coevolve):
+            raise ValueError("O treino contínuo requer o treino conjunto da X-Bow 3.0.")
+        if continuous:
+            limits["games"] = (1, 8)
         for key, (low, high) in limits.items():
-            value = request.get(key)
+            if continuous and key in ("updates", "evaluate"):
+                params[key] = 0
+                continue
+            value = request.get(key, 4) if continuous and key == "games" else request.get(key)
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"Valor fora do intervalo permitido para {key}.")
             params[key] = value
-        if coevolve:
+        if coevolve and not continuous:
             params["games"] = 1
         job_id = uuid4().hex
         args = [
@@ -285,6 +293,9 @@ class DashboardJobs:
         if coevolve:
             args.append("--coevolve")
         params["coevolve"] = coevolve
+        if continuous:
+            args += ["--continuous", "--parallel-games", str(params["games"])]
+        params["continuous"] = continuous
         args += ["--output", str(output)]
         folder = self.store / job_id
         folder.mkdir()
@@ -319,8 +330,9 @@ def worker(folder):
     state = load_json(folder / "state.json")
     state["status"] = "running"
     save_json(folder / "state.json", state)
+    live_folder = folder / "arena-live"
     env = {**os.environ, "XBOW_STOP_FILE": str(folder / "stop"), "PYTHONUTF8": "1",
-           "XBOW_ARENA": "1"}
+           "XBOW_ARENA": "1", "XBOW_ARENA_DIR": str(live_folder)}
     with (folder / "training.log").open("ab") as log:
         try:
             result = subprocess.run(config["command"], env=env, stdin=subprocess.DEVNULL,
@@ -334,6 +346,12 @@ def worker(folder):
                 status = "stopped"
             state.update(status=status, ended=timestamp(), exit_code=result.returncode)
     save_json(folder / "state.json", state)
+    for path in live_folder.iterdir() if live_folder.is_dir() else ():
+        if path.suffix in {".json", ".tmp"}:
+            with suppress(OSError):
+                path.unlink(missing_ok=True)
+    with suppress(OSError):
+        live_folder.rmdir()
 
 
 if __name__ == "__main__":

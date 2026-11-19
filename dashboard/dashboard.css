@@ -222,117 +222,34 @@ footer { color: var(--faint); font-size: .75rem; padding: 11px 0 25px; }
   html { scroll-behavior: auto; }
 }
 .arena-panel { margin-top: 16px; border-color: #485263; }
-.arena-tabs { display: flex; flex-wrap: wrap; gap: 5px; border-bottom: 1px solid var(--line); margin-bottom: 16px; }
-.arena-tabs button { background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 10px 12px; color: var(--muted); cursor: pointer; font: inherit; font-size: .84rem; }
-.arena-tabs button[aria-pressed="true"] { border-bottom-color: var(--bc); color: var(--ink); }
-.arena-content { display: grid; grid-template-columns: minmax(225px, 335px) minmax(0, 1fr); gap: 20px; align-items: start; }
-.arena-actions { display: flex; flex-wrap: wrap; gap: 6px; }
-.arena-content.comparing { grid-template-columns: minmax(0, 1fr); }
-.comparing .arena-views { display: grid; grid-template-columns: repeat(2, minmax(0, 335px)); gap: 14px; align-items: start; }
-.arena-views h3 { margin: 0 0 8px; font-size: .87rem; }
-.arena-comparison { min-width: 0; }
-.arena-recording { aspect-ratio: 18/32; display: grid; place-items: center; overflow: hidden; border: 1px solid var(--line);
-  border-radius: 12px; background: #0b1017; }
-.arena-recording video { display: block; width: 100%; height: 100%; object-fit: contain; }
-.arena-recording p { margin: 14px; text-align: center; color: var(--muted); font-size: .85rem; }
-.arena-video-tools { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 5px 8px; margin-top: 9px; }
-.arena-video-tools label { grid-column: 1 / -1; color: var(--muted); font-size: .76rem; }
-.arena-video-tools input { min-width: 0; color: var(--muted); font-size: .76rem; }
-.arena-video-tools .secondary { font-size: .72rem; }
-.arena-comparison > p { margin: 7px 0 0; font-size: .75rem; overflow-wrap: anywhere; }
-.arena-align-hint { color: var(--muted); }
+.arena-live-section + .arena-live-section { margin-top: 20px; }
+.arena-live-heading { display: flex; align-items: baseline; justify-content: space-between; flex-wrap: wrap; gap: 4px 14px; margin-bottom: 9px; }
+.arena-live-heading h3, .arena-live-heading p { margin: 0; }
+.arena-live-heading h3 { font-size: .92rem; }
+.arena-live-heading p { font-size: .77rem; }
+.arena-trends, .arena-live-grid { display: grid; gap: 10px; }
+.arena-trends { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.arena-trend, .arena-live-tile { min-width: 0; border: 1px solid var(--line); background: #151e28; border-radius: 8px; }
+.arena-trend { --trend-color: #6ed4e1; padding: 10px 13px; }
+.arena-trend[data-arena-model="rival"] { --trend-color: #f89078; }
+.arena-trend h4 { margin: 0 0 3px; color: var(--trend-color); font-size: .81rem; }
+.arena-trend strong { font-size: 1.54rem; font-variant-numeric: tabular-nums; }
+.arena-trend [data-delta] { margin-left: 8px; font-size: .76rem; color: var(--muted); }
+.arena-trend [data-delta][data-direction="up"] { color: var(--bc); }
+.arena-trend [data-delta][data-direction="down"] { color: #f89078; }
+.arena-trend canvas { display: block; width: 100%; height: 42px; margin: 2px 0; }
+.arena-trend small, .arena-live-tile small { color: var(--muted); font-size: .72rem; }
+.arena-live-grid { grid-template-columns: repeat(auto-fit, minmax(min(100%, 165px), 1fr)); }
+.arena-live-grid:has(> :only-child) { grid-template-columns: minmax(0, 280px); }
+.arena-live-tile { padding: 7px; }
+.arena-live-tile .arena-video { width: 100%; max-width: 260px; margin: 0 auto; }
+.arena-live-tile h4 { margin: 2px 0 4px; font-size: .81rem; overflow-wrap: anywhere; }
+.arena-live-tile small { display: block; margin-bottom: 5px; }
+.arena-live-tile .arena-live-teams { display: flex; justify-content: space-between; gap: 5px; margin-top: 5px; font-size: .69rem; font-variant-numeric: tabular-nums; }
+.arena-live-teams span { color: var(--side-color); }
 .arena-video { aspect-ratio: 18/32; position: relative; border-radius: 12px; overflow: hidden; border: 1px solid #4b7169; background: #203a33; }
 .arena-video canvas { display: block; width: 100%; height: 100%; }
 .arena-video time { position: absolute; top: 8px; left: 8px; background: #101a21e8; color: #edf6ef; border-radius: 5px; padding: 4px 8px; font-size: .78rem; font-variant-numeric: tabular-nums; }
-.arena-controls { display: flex; align-items: center; gap: 7px; margin-top: 9px; }
-.arena-controls input { accent-color: var(--bc); flex: 1; min-width: 45px; }
-.arena-controls select { min-height: 30px; padding: 4px; }
-.arena-controls .secondary { min-height: 32px; padding: 5px 8px; font-size: .76rem; }
-.arena-watch:has(#arena-preview:not([hidden])) { display: flex; flex-direction: column; }
-.arena-controls:has(#arena-preview:not([hidden])) { order: -1; margin: 0 0 8px; flex-wrap: wrap; }
-.arena-controls:has(#arena-preview:not([hidden])) input { flex-basis: 100%; order: 1; }
-.arena-info { display: grid; gap: 14px; min-width: 0; }
-.arena-match label { display: flex; align-items: center; gap: 8px; font-size: .78rem; color: var(--muted); }
-.arena-match select { min-width: 0; max-width: 100%; }
-.arena-match p { margin: 8px 0 0; color: var(--muted); font-size: .82rem; overflow-wrap: anywhere; }
-.arena-teams { display: grid; gap: 8px; }
-.arena-team { border: 1px solid var(--line); border-left: 3px solid var(--team-color); border-radius: 6px; padding: 8px 10px; background: #151e28; }
-.arena-team-head, .arena-move { display: flex; align-items: baseline; justify-content: space-between; gap: 8px; }
-.arena-team-head strong { color: var(--team-color); font-size: .82rem; }
-.arena-team-head span, .arena-move time { color: var(--muted); font-variant-numeric: tabular-nums; font-size: .75rem; }
-.arena-elixir {
-  height: 5px;
-  margin-block: 6px;
-  border-radius: 4px;
-  background: linear-gradient(90deg, #b078d5 var(--elixir, 0%), #0f1720 var(--elixir, 0%));
-}
-.arena-hand { display: grid; grid-template-columns: repeat(4, minmax(0, 80px)); gap: 6px; margin-top: 8px; }
-.arena-hand-card {
-  display: grid;
-  grid-template-rows: auto 1fr;
-  justify-items: center;
-  align-items: center;
-  gap: 4px;
-  padding: 4px;
-  min-width: 0;
-  background: #101b25;
-  border: 1px solid #34434d;
-  border-radius: 6px;
-}
-.arena-card-icon {
-  display: grid;
-  place-items: center;
-  width: min(100%, 34px);
-  aspect-ratio: 1;
-  color: var(--card-tone);
-  border-radius: 4px;
-  background-color: #23343e;
-  font-size: .92rem;
-}
-.arena-card-label { font-size: .67rem; color: var(--ink); text-align: center; overflow-wrap: anywhere; }
-.arena-info small { display: block; margin-top: 4px; color: var(--muted); font-size: .75rem; overflow-wrap: anywhere; }
-.arena-info h3 { margin: 0 0 6px; font-size: .88rem; }
-.arena-moves { margin: 0; padding: 0; list-style: none; }
-.arena-move { padding: 6px 0; border-top: 1px solid var(--line); font-size: .78rem; }
-.arena-move strong { color: var(--team-color); font-weight: 600; }
-.arena-decision { border: 1px solid var(--line); padding: 9px 11px; border-radius: 7px; }
-.arena-decision p, .arena-result { font-size: .82rem; margin: 5px 0 0; overflow-wrap: anywhere; }
-.arena-result { color: var(--bc); }
-.arena-decision .human { color: #ffe194; }
-.arena-decision .prediction { color: #d2b4ff; }
-.arena-decision:not([hidden]) { grid-row: 2; }
-.arena-decision-head, .arena-probability > div:first-child {
-  display: flex;
-  justify-content: space-between;
-  align-items: baseline;
-  flex-wrap: wrap;
-  gap: 4px 12px;
-}
-.arena-decision-head h3 { margin-bottom: 0; }
-.arena-decision-head small { color: var(--bc); }
-.arena-decision-choices, .arena-probabilities {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 150px), 1fr));
-  gap: 8px;
-  margin: 8px 0;
-}
-.arena-decision-choices > div, .arena-probability {
-  min-width: 0;
-  padding: 6px 8px;
-  border: 1px solid #33414c;
-  border-radius: 6px;
-  background: #111a24;
-  font-size: .78rem;
-}
-.arena-decision-choices small { margin: 0 0 4px; }
-.arena-probability-track { height: 5px; margin-top: 5px; background: #27333f; border-radius: 4px; overflow: hidden; }
-.arena-probability-track i { display: block; height: 100%; background: currentColor; }
-@media (max-width: 620px) {
-  .arena-content { grid-template-columns: minmax(0, 1fr); }
-  .arena-watch { width: min(100%, 315px); }
-  .comparing .arena-views { grid-template-columns: minmax(0, 335px); }
-  .comparing .arena-watch { width: 100%; }
-}
 .video-filters, .video-pages { display: flex; flex-wrap: wrap; gap: 8px 14px; align-items: end; }
 .video-filters { margin-bottom: 14px; }
 .video-filters label { display: grid; gap: 5px; color: var(--muted); font-size: .78rem; }

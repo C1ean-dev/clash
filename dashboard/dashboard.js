@@ -75,18 +75,51 @@ function simultaneousGames(info) {
   return info.parallel_games > 1 ? ` · até ${info.parallel_games} simultâneas` : "";
 }
 
+function ppoProgress(info, total = info.total) {
+  const title = info.joint ? `X-Bow 3.0 × ${rivalNames[info.rival] || "IA adversária"}` : "Self-play";
+  if (info.continuous) {
+    const done = info.completed_games ?? (info.event === "ppo_game" ? info.update - 1 : info.done) - info.session_start;
+    let detail = `${show(done)} partidas nesta sessão`;
+    if (info.event === "ppo_match") detail += info.parallel_games > 1
+      ? ` · Simulando ${info.parallel_games} em paralelo` : " · Simulando a próxima";
+    if (info.event === "ppo_game") detail += " · Atualizando as duas IAs";
+    return ["ppo", title, detail, done, null];
+  }
+  const checkpoint = info.total - total;
+  const update = info.update - checkpoint;
+  const done = info.done - checkpoint;
+  const unit = info.joint ? "Partida" : "Atualização";
+  const position = `${unit} ${update}/${total}`;
+  if (info.event === "ppo_match") {
+    const games = `${info.games} ${info.games === 1 ? "partida" : "partidas"}`;
+    const simulation = info.joint ? "Jogando" : `Simulando ${games}${simultaneousGames(info)}`;
+    return ["ppo", title, `${position} · ${simulation}`, done, total];
+  }
+  if (info.event === "ppo_game") {
+    let detail = `${info.done}/${info.games} partidas simuladas${simultaneousGames(info)}`;
+    if (info.joint) detail = "Atualizando as duas IAs";
+    else if (info.done === info.games) detail = "Otimizando o PPO";
+    return ["ppo", title, `${position} · ${detail}`, update - 1 + info.done / (info.games + 1), total];
+  }
+  const completed = info.joint ? "partidas concluídas" : "atualizações concluídas";
+  const origin = info.event === "ppo_start" && checkpoint > 0 ? ` · checkpoint ${checkpoint}` : "";
+  return ["ppo", title, `${done}/${total} ${completed}${origin}`, done, total];
+}
+
 function phase(run) {
   const info = run?.phase || {};
   const names = {
     started: "Início do processo", stopped: "Execução interrompida", failed: "Falha na execução",
     finished: "Execução concluída", replay_validation: "Validação em replays",
     replays: "Reconstrução de replays", bc_start: "Imitação", bc_batch: "Imitação", bc_epoch: "Imitação",
-    ppo_start: "Self-play", ppo_game: "Self-play", ppo_update: "Self-play",
+    ppo_start: "Self-play", ppo_match: "Self-play", ppo_game: "Self-play", ppo_update: "Self-play",
     evaluation_start: "Avaliação na arena", evaluation_pair: "Avaliação na arena",
   };
   let details = "";
-  if (info.event === "ppo_game") {
-    details = `Atualização ${info.update}/${info.total} · partida ${info.done}/${info.games}${simultaneousGames(info)}`;
+  if (info.event?.startsWith("ppo")) {
+    const job = data.job;
+    const tracked = activeJob(job) && job.run_id === run.id && Date.parse(info.time) >= Date.parse(job.started);
+    details = ppoProgress(info, tracked ? job.parameters.updates : info.total)[2];
   } else if (info.event === "bc_batch") {
     details = `Época ${info.epoch}/${info.total} · lote ${info.done}/${info.batches}`;
   } else if (Number.isFinite(info.done) && Number.isFinite(info.total)) {
@@ -283,17 +316,7 @@ function syncReplayLimit(resume) {
 
 function stageProgress(job, info) {
   const event = info.event || "";
-  if (info.joint && event.startsWith("ppo")) {
-    const title = `X-Bow 3.0 × ${rivalNames[info.rival] || "IA adversária"}`;
-    if (event === "ppo_match") {
-      return ["ppo", title, `Jogando a partida ${info.update}/${info.total}`, info.done, info.total];
-    }
-    if (event === "ppo_game") {
-      return ["ppo", title, `Atualizando as duas IAs · partida ${info.update}/${info.total}`,
-        info.update - 0.5, info.total];
-    }
-    return ["ppo", title, `${info.done}/${info.total} atualizações concluídas`, info.done, info.total];
-  }
+  if (event.startsWith("ppo")) return ppoProgress(info, job.parameters.updates);
   if (event.startsWith("replays")) {
     return ["replays", "Reconstrução de replays", `${info.done}/${info.total} replays · ${info.rejected || 0} descartados`, info.done, info.total];
   }
@@ -303,13 +326,6 @@ function stageProgress(job, info) {
   }
   if (event.startsWith("bc")) {
     return ["bc", "Imitação", `${info.done || 0}/${info.total} épocas concluídas`, info.done || 0, info.total];
-  }
-  if (event === "ppo_game") {
-    return ["ppo", "Self-play", `Atualização ${info.update}/${info.total} · partida ${info.done}/${info.games}${simultaneousGames(info)}`,
-      info.update - 1 + info.done / (info.games + 1), info.total];
-  }
-  if (event.startsWith("ppo")) {
-    return ["ppo", "Self-play", `${info.done}/${info.total} atualizações concluídas${simultaneousGames(info)}`, info.done, info.total];
   }
   if (event.startsWith("evaluation")) {
     const detail = info.joint ? "partidas entre os dois modelos" : "confrontos por modelo e rival";
@@ -331,8 +347,16 @@ function renderTraining() {
   coevolve.disabled = data.joint_training !== "shared_match" || !resume || deck !== "xbow_30";
   byId("training-coevolve-option").hidden = coevolve.disabled;
   const joint = !coevolve.disabled && coevolve.checked;
+  const continuousInput = byId("training-continuous");
+  continuousInput.disabled = !joint;
+  byId("training-continuous-option").hidden = !joint;
+  const continuous = joint && continuousInput.checked;
+  byId("training-continuous-games-option").hidden = !continuous;
+  syncSlider(byId("training-continuous-games"));
   byId("training-updates-title").textContent = joint ? "Partidas de treino" : "Atualizações PPO";
   byId("training-games").closest("label").hidden = joint;
+  byId("training-updates").closest("label").hidden = continuous;
+  byId("training-evaluate").closest("label").hidden = continuous;
   for (const field of document.querySelectorAll("[data-new]")) {
     field.hidden = resume;
     field.querySelector("input").disabled = field.hidden;
@@ -349,7 +373,9 @@ function renderTraining() {
   byId("start-training").textContent = sending ? "Iniciando…" :
     resume ? "Retomar treino" : "Iniciar treino";
   let hint = "O máximo conta os replays candidatos do deck. O simulador pode aceitar menos.";
-  if (resume) {
+  if (continuous) {
+    hint = "As duas IAs aprendem e salvam o progresso ao fim de cada lote. Parar treino encerra após o lote atual.";
+  } else if (resume) {
     hint = joint
       ? "O rival alterna entre Corredor 2.6, Gigante Real e Splashyard. As duas IAs aprendem após cada partida."
       : `Continua o experimento ${groupNames[run.group] || run.group} a partir do último checkpoint.`;
@@ -382,9 +408,10 @@ function renderTraining() {
   }
   byId("job-stage").textContent = active ? title : jobStatus[job.status];
   byId("job-detail").textContent = job.status === "stopping" ?
-    "Aguardando o fim do lote ou da partida atual." : active ? detail : job.run_id;
+    (job.parameters.continuous ? "Terminando o lote atual e salvando o checkpoint."
+      : "Aguardando o fim do lote ou da partida atual.") : active ? detail : job.run_id;
   const bar = byId("job-progress");
-  bar.hidden = !active && job.status !== "finished";
+  bar.hidden = Boolean(job.parameters.continuous) || (!active && job.status !== "finished");
   if (job.status === "finished") { bar.max = 1; bar.value = 1; }
   else if (Number.isFinite(done) && total > 0) { bar.max = total; bar.value = done; }
   else { bar.removeAttribute("value"); bar.max = 1; }
@@ -449,12 +476,17 @@ function render(force = false) {
   const run = selected();
   renderTraining();
   const job = data.job;
-  const watchingJob = job && job.run_id === current;
-  const viewPhase = watchingJob ? (run?.progress.event || "") : "";
+  const running = activeJob(job);
+  const liveRun = running ? data.runs.find(item => item.id === job.run_id) : run;
+  const progress = liveRun?.progress;
+  const liveProgress = running && Date.parse(progress?.time) >= Date.parse(job.started) ? progress : {};
+  const viewPhase = liveProgress.event || "";
   const stage = ["replays", "bc", "ppo", "evaluation"].find(key => viewPhase.startsWith(key));
   window.trainingArena.update({
-    deck, run: current, active: watchingJob && activeJob(job),
-    phase: stage || (watchingJob && job.mode === "resume" ? "ppo" : "replays"),
+    deck: running ? job.deck : deck, run: running ? job.run_id : current, active: running,
+    phase: stage || (job?.mode === "resume" ? "ppo" : "replays"),
+    detail: running ? stageProgress(job, liveProgress)[2] : "",
+    updates: liveRun?.updates,
   });
   const next = JSON.stringify([run, deck]);
   if (!force && revision === next) return;
@@ -511,6 +543,7 @@ document.querySelector(".deck-switch").addEventListener("click", event => {
 byId("chart-metric").addEventListener("change", drawChart);
 byId("training-settings").addEventListener("input", event => {
   const slider = event.target;
+  if (slider.type !== "range") return;
   if (slider.id === "training-mode") {
     renderTraining();
   } else {
@@ -524,12 +557,20 @@ byId("training-form").addEventListener("submit", event => {
   const payload = { deck, mode: executionMode(), run_id: current };
   const coevolve = byId("training-coevolve");
   payload.coevolve = !coevolve.disabled && coevolve.checked;
+  const continuous = byId("training-continuous");
+  payload.continuous = !continuous.disabled && continuous.checked;
+  if (payload.continuous && !data.continuous_parallel) {
+    byId("training-hint").textContent = "Reinicie o servidor do painel para ativar as partidas simultâneas.";
+    return;
+  }
   for (const key of parameterKeys) {
     payload[key] = byId(`training-${key}`).valueAsNumber;
   }
+  if (payload.continuous) payload.games = byId("training-continuous-games").valueAsNumber;
   jobAction("start", payload);
 });
 byId("training-coevolve").addEventListener("change", renderTraining);
+byId("training-continuous").addEventListener("change", renderTraining);
 byId("stop-job").addEventListener("click", () => jobAction("stop", { id: data.job.id }));
 byId("view-job").addEventListener("click", () => { follow(data.job); render(true); });
 byId("chart").addEventListener("pointermove", event => {

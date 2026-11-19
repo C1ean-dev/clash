@@ -1,3 +1,5 @@
+from contextlib import ExitStack
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,9 +12,13 @@ from royalegym.protocol import (
 )
 from royaleimitate.replays import CARD_NAMES
 
+from xbow_arena import LIVE_FRAMES, live_data
 from xbow_environment import PPO_GAMMA, battle_env
 from xbow_capture_bridge import CaptureBridge
 from xbow_dashboard import DashboardHandler
+from xbow_metrics import (
+    TrainingStopped, check_training_stop, defer_training_stop, read_run_journal, training_journal,
+)
 from xbow_play_session import PlaySession, PLAY_STEP_MS
 from xbow_public_feed import PublicFeed
 from xbow_replays import DECKS
@@ -106,6 +112,67 @@ class ResamplingTests(unittest.TestCase):
 
 
 class JointTrainingTests(unittest.TestCase):
+    def test_continuous_stop_waits_for_checkpoint_boundary(self):
+        with TemporaryDirectory() as directory:
+            signal = Path(directory) / "stop"
+            with patch.dict(os.environ, {"XBOW_STOP_FILE": str(signal)}):
+                with defer_training_stop(True):
+                    signal.touch()
+                    check_training_stop()
+                    with self.assertRaises(TrainingStopped):
+                        check_training_stop(at_boundary=True)
+                with self.assertRaises(TrainingStopped):
+                    check_training_stop()
+
+    def test_continuous_journal_bounds_its_events_and_keeps_regular_history(self):
+        with TemporaryDirectory() as directory, patch("xbow_metrics.CONTINUOUS_EVENTS", 12):
+            output = Path(directory)
+            with training_journal(output, "xbow_30") as report:
+                report("ppo_update", done=1)
+            regular = (output / "progress.jsonl").read_bytes()
+            with training_journal(output, "xbow_30", continuous=True) as report:
+                for update in range(2, 270):
+                    report("ppo_update", done=update)
+            self.assertEqual((output / "progress.jsonl").read_bytes(), regular)
+            updates = [event["done"] for event in read_run_journal(output)
+                       if event["event"] == "ppo_update"]
+            self.assertEqual(updates[0], 1)
+            self.assertEqual(updates[-1], 269)
+            self.assertLess(len(updates), 12 + 128)
+
+    def test_live_arena_limits_frames_and_discards_finished_boards(self):
+        with ExitStack() as stack:
+            output = Path(stack.enter_context(TemporaryDirectory()))
+            folder = output / "arena-live"
+            stack.enter_context(patch.dict(os.environ, {"XBOW_ARENA": "1", "XBOW_ARENA_DIR": str(folder)}))
+            stack.enter_context(patch("xbow_arena.PUBLISH_INTERVAL", 0))
+            environments = [battle_env("xbow_30") for _ in range(4)]
+            for env in environments:
+                stack.callback(env.close)
+                reset = env.reset
+
+                def short_match(*, seed, options, reset=reset):
+                    return reset(seed=seed, options={**options, "max_ticks": 120})
+
+                stack.enter_context(patch.object(env, "reset", side_effect=short_match))
+            policy = Mock()
+            matches = [Match(Rival("free", "xbow_30", policy), n % 2, n, n) for n in range(1, 5)]
+            frame_counts = []
+
+            def decide(_, inputs, device):
+                boards = live_data(folder, "ppo")
+                self.assertEqual([board["header"]["number"] for board in boards], [1, 2, 3, 4])
+                frame_counts.extend(len(board["frames"]) for board in boards)
+                self.assertEqual(len(list(folder.iterdir())), 4)
+                return [(0, 0.0, 0.0)] * len(inputs)
+
+            stack.enter_context(patch("xbow_selfplay.decide_batch", side_effect=decide))
+            play_wave(output, "ppo", policy, matches, environments, "cpu")
+            self.assertEqual(min(frame_counts), 1)
+            self.assertEqual(max(frame_counts), LIVE_FRAMES)
+            self.assertEqual(live_data(folder, "ppo"), [])
+            self.assertFalse(list(folder.iterdir()))
+
     def test_potential_is_zero_sum_and_leaves_the_discounted_outcome_objective(self):
         env = battle_env("xbow_30", "hog_26", reward_profile="potential")
         self.addCleanup(env.close)

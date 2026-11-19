@@ -35,7 +35,7 @@ O máximo do slider **Replays** acompanha a quantidade de candidatos do deck sel
 
 O simulador agrupa as previsões das partidas em andamento no mesmo processo. O treino PPO em CPU usa até quatro threads do PyTorch por padrão e roda até oito partidas em paralelo quando há pelo menos quatro threads. Nos demais casos, o padrão é quatro partidas em paralelo. O controle **Partidas por atualização** define o total de partidas antes de cada atualização PPO. Na linha de comando, use `--threads` para ajustar o PyTorch e `--parallel-games` de 1 a 8 para definir quantas partidas avançam juntas.
 
-Em **Arena do treino**, veja o estado do tabuleiro, as mãos, o elixir e as jogadas registrados pelo simulador. **Imitação** compara a jogada humana com a decisão do modelo no mesmo quadro e mostra como a previsão muda ao longo dos lotes. **Self-play** e **Avaliação** mostram as partidas jogadas pelo modelo. Pause, avance pela gravação ou selecione um dos três registros mais recentes de cada etapa. Os exemplos com a indicação **Demonstração com dados locais** usam replays do dataset e checkpoints já salvos.
+Em **Arena do treino**, acompanhe os tabuleiros ao vivo durante a reconstrução dos replays, a imitação, o self-play e a avaliação. Cada partida publica um pequeno conjunto temporário de quadros, descartado ao terminar. Os gráficos da X-Bow 3.0 e do Rival Live usam as métricas das partidas do treino conjunto.
 
 ## Preparação no Windows
 
@@ -78,6 +78,12 @@ Para IceBow, use `--deck icebow` e seus caminhos correspondentes. A liga usa che
 Para treinar duas IAs na mesma partida, em **Retomar PPO** de X-Bow 3.0 marque **Treinar X-Bow e a IA adversária na mesma partida**. A X-Bow continua do checkpoint selecionado e usa seu deck fixo. Uma única rede adversária alterna a cada partida entre os decks completos de Corredor 2.6, Gigante Real e Splashyard. As duas redes jogam, recebem as recompensas do próprio lado e atualizam seus pesos antes do próximo confronto. O checkpoint PPO salva as duas redes e seus otimizadores juntos após cada partida e a retomada continua da posição salva na rotação.
 
 Na linha de comando, acrescente `--coevolve` ao comando de retomada de X-Bow 3.0. `--ppo-updates` indica o número de partidas. A avaliação opcional joga `--evaluate` partidas por deck adversário com pesos congelados e alterna os lados.
+
+Para treinar sem limite de partidas, em **Retomar PPO** marque o treino conjunto e **Treino contínuo até eu parar**. Use **Partidas simultâneas** para escolher de 1 a 8 tabuleiros. O padrão é 4. As duas IAs usam as partidas do lote para atualizar seus pesos e salvar o checkpoint conjunto. **Parar treino** conclui o lote atual antes de encerrar. Para continuar depois, retome o mesmo experimento.
+
+```powershell
+.\.venv\Scripts\python.exe xbow_dual_learning_pipeline.py --coevolve --continuous --parallel-games 4 --resume-ppo --output runs/calibrated/xbow_30 --bc-checkpoint runs/calibrated/xbow_30/bc.pt
+```
 
 O treino conjunto usa a recompensa `potential` por padrão. Ela combina o resultado da partida com sinais de coroas, vida das torres e elixir na barra e nas tropas vivas. O foco da X-Bow aparece nas métricas da partida. `--reward legacy` seleciona a fórmula anterior para retomar um treino de controle.
 

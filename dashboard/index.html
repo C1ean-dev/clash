@@ -197,6 +197,15 @@
             <input id="training-coevolve" type="checkbox">
             Treinar X-Bow e a IA adversária na mesma partida
           </label>
+          <label id="training-continuous-option" hidden>
+            <input id="training-continuous" type="checkbox">
+            Treino contínuo até eu parar
+          </label>
+          <label class="training-slider" id="training-continuous-games-option" hidden>
+            <span class="slider-head"><span>Partidas simultâneas</span><span class="slider-value" aria-hidden="true">4</span></span>
+            <input id="training-continuous-games" type="range" min="1" max="8" value="4">
+            <span class="slider-bounds" aria-hidden="true"><span>1</span><span>8</span></span>
+          </label>
           <label class="training-slider">
             <span class="slider-head"><span id="training-updates-title">Atualizações PPO</span><span class="slider-value" aria-hidden="true">4</span></span>
             <input id="training-updates" type="range" min="1" max="100" value="4">
@@ -238,62 +247,32 @@
     <section class="panel arena-panel" id="arena" aria-labelledby="arena-title">
       <div class="section-head">
         <div><h2 id="arena-title">Arena do treino</h2><p id="arena-source">Carregando os dados da arena…</p></div>
-        <div class="arena-actions">
-          <button type="button" class="secondary" id="arena-compare" aria-controls="arena-comparison" aria-expanded="false" hidden>Comparar com vídeo</button>
-          <button type="button" class="secondary" id="arena-follow">Seguir treino</button>
-        </div>
       </div>
-      <div class="arena-tabs" aria-label="Etapa na arena">
-        <button type="button" data-view-stage="replays" aria-pressed="true">Replays</button>
-        <button type="button" data-view-stage="bc" aria-pressed="false">Imitação</button>
-        <button type="button" data-view-stage="ppo" aria-pressed="false">Self-play</button>
-        <button type="button" data-view-stage="evaluation" aria-pressed="false">Avaliação</button>
-      </div>
-      <p class="empty" id="arena-empty">Carregando os dados da arena…</p>
-      <div class="arena-content" id="arena-content" hidden>
-        <div class="arena-views">
-          <div class="arena-watch">
-            <h3 id="arena-reconstruction-title" hidden>Reconstrução</h3>
-            <div class="arena-video">
-              <canvas id="arena-board" role="img" aria-label="Tabuleiro da arena com torres, tropas e posições de jogadas"></canvas>
-              <time id="arena-clock">0:00</time>
-            </div>
-            <div class="arena-controls">
-              <button type="button" class="secondary" id="arena-play">Reproduzir</button>
-              <button type="button" class="secondary" id="arena-preview" hidden>Rever jogada</button>
-              <input id="arena-seek" type="range" min="0" max="0" value="0" aria-label="Posição na gravação">
-              <select id="arena-speed" aria-label="Velocidade da reprodução">
-                <option value="1" selected>1×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option>
-              </select>
-            </div>
+      <div id="arena-live">
+        <div class="arena-live-section">
+          <div class="arena-live-heading">
+            <h3>Evolução das IAs</h3>
+            <p id="arena-live-sample" class="muted">Resultados das partidas do treino conjunto</p>
           </div>
-          <section class="arena-comparison" id="arena-comparison" aria-labelledby="arena-video-title" hidden>
-            <h3 id="arena-video-title">Vídeo do Clash Royale</h3>
-            <div class="arena-recording">
-              <video id="arena-replay-video" controls playsinline muted preload="metadata" aria-label="Vídeo local da partida" hidden></video>
-              <p id="arena-video-placeholder">Selecione a gravação desta mesma partida.</p>
-            </div>
-            <div class="arena-video-tools">
-              <label for="arena-video-file">Arquivo de vídeo</label>
-              <input type="file" id="arena-video-file" accept="video/*,.mp4,.webm,.mov,.m4v">
-              <button type="button" id="arena-align-video" class="secondary" disabled>Alinhar neste ponto</button>
-            </div>
-            <p id="arena-video-status" class="muted" role="status"></p>
-            <p class="arena-align-hint">Use Reproduzir na reconstrução para ver os dois juntos. Para alinhar, pause e posicione as duas telas na mesma jogada.</p>
-          </section>
+          <div class="arena-trends">
+            <article class="arena-trend" data-arena-model="xbow">
+              <h4>X-Bow 3.0</h4><strong data-rate>—</strong><span data-delta></span>
+              <canvas width="320" height="42" aria-hidden="true"></canvas>
+              <small data-record>Aguardando resultados</small>
+            </article>
+            <article class="arena-trend" data-arena-model="rival">
+              <h4>Rival Live</h4><strong data-rate>—</strong><span data-delta></span>
+              <canvas width="320" height="42" aria-hidden="true"></canvas>
+              <small data-record>Aguardando resultados</small>
+            </article>
+          </div>
         </div>
-        <div class="arena-info">
-          <div class="arena-match">
-            <label id="arena-list-label">Gravação <select id="arena-list"></select></label>
-            <p id="arena-context"></p>
+        <div class="arena-live-section">
+          <div class="arena-live-heading">
+            <h3>Partidas do treino</h3><p id="arena-live-status" class="muted"></p>
           </div>
-          <div class="arena-teams" id="arena-teams"></div>
-          <div id="arena-decision" class="arena-decision" hidden></div>
-          <div id="arena-moves-box">
-            <h3>Jogadas até aqui</h3>
-            <ol id="arena-moves" class="arena-moves"></ol>
-          </div>
-          <p class="arena-result" id="arena-result" hidden></p>
+          <div class="arena-live-grid" id="arena-live-grid"></div>
+          <p class="empty" id="arena-live-empty" role="status">Aguardando o treino.</p>
         </div>
       </div>
     </section>
