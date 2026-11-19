@@ -1,7 +1,7 @@
 """Masked policy, behavioral cloning, and PPO losses shared by both decks."""
 
 from collections import Counter
-from contextlib import nullcontext
+from contextlib import ExitStack, nullcontext
 from copy import deepcopy
 import json
 import os
@@ -15,7 +15,7 @@ from torch import nn
 from torch.distributions import Categorical, kl_divergence
 from torch.utils.data import DataLoader, Dataset, WeightedRandomSampler
 from royaleimitate.replays import CARD_NAMES
-from xbow_arena import ArenaCapture, arena_enabled
+from xbow_arena import ArenaCapture, KEEP_CLIPS, arena_enabled
 from xbow_metrics import check_training_stop
 
 from xbow_replays import reconstruct, winning_replays
@@ -465,18 +465,37 @@ def fit_clone(env, args, device, path, frame_store=None, report=None):
     training_batches = DataLoader(train, batch_size=args.batch_size, sampler=sampler)
     val_batches = DataLoader(val, batch_size=args.batch_size)
     optimizer = torch.optim.AdamW(policy.parameters(), lr=3e-4)
-    example = next((match for match in train_matches if match.tag in examples), None)
-    recording = nullcontext()
-    probe = None
-    if example is not None:
-        seat, index, board = examples[example.tag]
-        probe = clone_probe(example, index, board, seat, device, policy.spec[-1])
-        recording = ArenaCapture(view_output, "bc", env, replay=example.tag, seat=seat)
-    with recording as capture:
+    with ExitStack() as recordings:
+        probes = []
+        for match, card in reversed(clone_examples(train_matches, examples)):
+            seat, index, board = examples[match.tag]
+            probe = clone_probe(match, index, board, seat, device, policy.spec[-1])
+            capture = recordings.enter_context(
+                ArenaCapture(view_output, "bc", env, replay=match.tag, seat=seat, probe_card=card)
+            )
+            probes.append((capture, probe))
         fit_clone_epochs(policy, train_matches, val_matches, training_batches, val_batches,
-                         optimizer, args, device, path, report, capture, probe)
-        if capture:
+                         optimizer, args, device, path, report, probes)
+        for capture, _ in probes:
             capture.finish({"status": "finished"})
+
+
+def clone_examples(matches, examples):
+    """Prefer different opening plays while keeping each comparison on a fixed board."""
+    distinct, repeats = {}, []
+    for match in matches:
+        if match.tag not in examples:
+            continue
+        seat, _, board = examples[match.tag]
+        card = next(move["card"] for move in board["moves"] if move["seat"] == seat)
+        if card in distinct:
+            if len(repeats) < KEEP_CLIPS:
+                repeats.append((match, card))
+        else:
+            distinct[card] = (match, card)
+            if len(distinct) == KEEP_CLIPS:
+                break
+    return (*distinct.values(), *repeats)[:KEEP_CLIPS]
 
 
 def clone_probe(match, index, board, seat, device, action_count):
@@ -494,17 +513,19 @@ def show_clone_example(capture, policy, probe, **metrics):
     features, target, board, seat = probe
     dist, _ = policy(*features)
     probs = dist.probs[0]
-    chosen = 0 if probs[0] >= .5 else int(probs[1:].argmax().item()) + 1
+    best_play = int(probs[1:].argmax().item()) + 1
+    chosen = 0 if probs[0] >= .5 else best_play
     hand = board["sides"][seat]["hand"]
     capture.frame(board, comparison={
         "human": capture.action(target, seat, hand), "model": capture.action(chosen, seat, hand),
         "play": float(1 - probs[0]), "target": float(probs[target]), "exact": chosen == target,
+        "alternative": capture.action(best_play, seat, hand) if not chosen and probs[best_play] > 0 else None,
         **metrics,
     })
 
 
 def fit_clone_epochs(policy, train_matches, val_matches, training_batches, val_batches,
-                     optimizer, args, device, path, report, capture, probe):
+                     optimizer, args, device, path, report, probes):
     best = float("inf")
     view_stride = max(15, len(training_batches) // 24)
     for epoch in range(args.epochs):
@@ -522,9 +543,10 @@ def fit_clone_epochs(policy, train_matches, val_matches, training_batches, val_b
             if report and (edge or batch % 15 == 0):
                 report("bc_batch", epoch=epoch + 1, total=args.epochs, done=batch,
                        batches=len(training_batches), loss=loss.item())
-            if capture and (edge or batch % view_stride == 0):
-                show_clone_example(capture, policy, probe, epoch=epoch + 1, batch=batch,
-                                   batches=len(training_batches), loss=loss.item())
+            if probes and (edge or batch % view_stride == 0):
+                for capture, probe in probes:
+                    show_clone_example(capture, policy, probe, epoch=epoch + 1, batch=batch,
+                                       batches=len(training_batches), loss=loss.item())
         policy.eval()
         check_training_stop()
         metrics = evaluate_clone(policy, val_batches, device)

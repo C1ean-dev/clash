@@ -1,25 +1,27 @@
 """Interactive play session against trained X-Bow and tactical AI models."""
 
-import json
+from collections import deque
+from math import isfinite
 from pathlib import Path
 import random
-import threading
-from threading import Thread, RLock, Lock
+from threading import Event, Lock, RLock, Thread
 import time
 from uuid import uuid4
 
 import numpy as np
-import torch
-
-from royalegym.opponents import PatientOpponent, PushOpponent
-from royaleimitate.replays import CARD_NAMES
+from royalegym.protocol import (
+    DeployStatus, HAND_SIZE, STATUS_INVISIBLE, STATUS_UNDERGROUND, slot_cost, status_of,
+)
 from xbow_environment import battle_env, RIVAL_DECKS
-from xbow_replays import DECKS, SEATS
-from xbow_selfplay import scripted_move, TACTICAL_RIVALS
+from xbow_replays import DECKS
+from xbow_selfplay import scripted_move
 from xbow_training import load_checkpoint
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
+PLAY_STEP_MS = 100
+AI_STEP_MS = 500
+BOT_DECKS = {"xbow": "xbow_30", "hog_push": "hog_26", "rg_patient": "royal_giant"}
 
 CARD_PT_NAMES = {
     "Xbow": "X-Bow",
@@ -174,372 +176,256 @@ def list_available_models():
 
 
 class PlaySession:
-    """Manages an active real-time battle between Human and AI."""
+    """Run the interactive simulation and expose a public view to the player."""
 
     def __init__(self, human_deck="hog_26", ai_deck="xbow_30", model_id="scripted:xbow", speed=1.0):
         self.session_id = uuid4().hex
         self.human_deck = human_deck
-        self.ai_deck = ai_deck
         self.model_id = model_id
-        self.speed = float(max(0.25, min(2.0, speed)))
-
-        # Auto-align ai_deck if a checkpoint with a specific deck is chosen
-        if self.model_id.startswith("ckpt:"):
-            rel = self.model_id.replace("ckpt:", "")
-            if "icebow" in rel:
-                self.ai_deck = "icebow"
-            elif "xbow_30" in rel:
-                self.ai_deck = "xbow_30"
-        elif self.model_id == "scripted:hog_push":
-            self.ai_deck = "hog_26"
-        elif self.model_id == "scripted:rg_patient":
-            self.ai_deck = "royal_giant"
-
-        self.human_seat = 0  # Blue (bottom)
-        self.ai_seat = 1     # Red (top)
-
-        self.lock = threading.RLock()
-        self.stopped = False
+        self.lock = RLock()
+        self.stopped = Event()
         self.paused = False
         self.finished = False
         self.result = None
-        self.seq = 0
-        self.queued_action = 0
-        self.recent_moves = []
         self.thread = None
+        self.seq = 0
+        self.next_ai_ms = 0
+        self.queued_action = None
+        self.command = None
+        self.command_id = 0
+        self.recent_moves = deque(maxlen=12)
+        self.set_speed(speed)
 
-        # Build battle environment
-        self.env = battle_env(self.human_deck, self.ai_deck)
+        if not isinstance(human_deck, str) or human_deck not in DECK_LABELS:
+            raise ValueError("Escolha um deck válido.")
+        self.ai_deck, self.policy, self.model_label = self._load_model(ai_deck, model_id)
+
+        self.env = battle_env(self.human_deck, self.ai_deck, decision_ms=PLAY_STEP_MS)
         self.parser = self.env.action_parser
         self.pitch = self.parser.pitch
-        self.seed = random.randint(1, 999999)
-        self.rng = np.random.default_rng([self.seed, 1 - self.ai_seat])
-        self.obs, _ = self.env.reset(seed=self.seed)
-
-        # Card metadata caching
-        engine_cards = self.env.engine.cards()
-        self.card_by_id = {c.card_id: c for c in engine_cards}
-        self.card_names = {c.card_id: c.name for c in engine_cards}
+        seed = random.randrange(1, 1 << 31)
+        self.rng = np.random.default_rng(seed)
+        self.obs, _ = self.env.reset(seed=seed, options={"mask_only": ("blue",)})
+        self.card_by_id = {card.card_id: card for card in self.env.engine.cards()}
         self.unit_names = dict(enumerate(self.env.engine.unit_types()))
 
-        # Load AI policy or scripted opponent
-        self.policy = None
-        self.model_label = "IA"
-        self._load_model()
+        arena = self.env.engine.arena()
+        scale = arena.half_size / self.pitch
+        self.arena = {
+            "width": self.parser.nx, "height": self.parser.ny,
+            "river": [arena.water_half_rows[0] * scale, (arena.water_half_rows[1] + 1) * scale],
+            "bridges": [[left * scale, (right + 1) * scale] for left, right in arena.bridges_half_cols],
+        }
 
-    def _load_model(self):
-        if self.model_id.startswith("ckpt:"):
-            rel_path = self.model_id.replace("ckpt:", "")
-            full_path = (RUNS / rel_path).resolve()
-            if full_path.is_file():
-                try:
-                    self.policy, info = load_checkpoint(full_path, self.ai_deck, device="cpu")
-                    phase_str = "PPO" if info.get("phase") == "ppo" else "BC"
-                    self.model_label = f"IA {phase_str} ({self.ai_deck})"
-                    return
-                except Exception as exc:
-                    print(f"Error loading checkpoint {full_path}: {exc}")
-        elif self.model_id == "scripted:hog_push":
-            self.model_label = "Bot Corredor (Push)"
-            return
-        elif self.model_id == "scripted:rg_patient":
-            self.model_label = "Bot Gigante Real"
-            return
-
-        # Fallback to scripted xbow
-        self.model_id = "scripted:xbow"
-        self.model_label = "Bot X-Bow (Scripted)"
+    @staticmethod
+    def _load_model(ai_deck, model_id):
+        if not isinstance(model_id, str):
+            raise ValueError("Escolha um oponente válido.")
+        if model_id.startswith("ckpt:"):
+            root = RUNS.resolve()
+            path = (root / model_id.removeprefix("ckpt:")).resolve()
+            if (not path.is_relative_to(root) or path.name not in ("bc.pt", "ppo.pt")
+                    or path.parent.name not in DECKS or not path.is_file()):
+                raise ValueError("O checkpoint selecionado está indisponível.")
+            deck = path.parent.name
+            try:
+                policy, info = load_checkpoint(path, deck, device="cpu")
+            except (OSError, KeyError, ValueError, RuntimeError) as exc:
+                raise ValueError("Não foi possível carregar o checkpoint selecionado.") from exc
+            return deck, policy, f"{DECK_LABELS[deck].split(' (')[0]} · {info['phase'].upper()}"
+        bot = model_id.removeprefix("scripted:")
+        if model_id == f"scripted:{bot}" and bot in BOT_DECKS:
+            deck = "icebow" if bot == "xbow" and ai_deck == "icebow" else BOT_DECKS[bot]
+            label = DECK_LABELS[deck].split(" (")[0]
+            return deck, None, f"{label} · Bot tático"
+        raise ValueError("Escolha um oponente válido.")
 
     def start(self):
         self.thread = Thread(target=self._game_loop, daemon=True)
         self.thread.start()
 
     def stop(self):
-        self.stopped = True
-        self.finished = True
-        if self.thread and self.thread.is_alive():
-            self.thread.join(timeout=1.0)
-        try:
+        self.stopped.set()
+        if self.thread is not None:
+            self.thread.join()
+        with self.lock:
+            self.finished = True
             self.env.close()
-        except Exception:
-            pass
 
-    def pause(self):
+    def toggle_pause(self, paused=None):
         with self.lock:
-            self.paused = True
-
-    def resume(self):
-        with self.lock:
-            self.paused = False
-
-    def toggle_pause(self):
-        with self.lock:
-            self.paused = not self.paused
+            if not self.finished:
+                self.paused = not self.paused if paused is None else paused
             return self.paused
 
     def set_speed(self, speed):
+        if not isfinite(speed):
+            raise ValueError("Escolha uma velocidade finita.")
         with self.lock:
-            self.speed = float(max(0.25, min(2.0, speed)))
+            self.speed = max(0.25, min(2.0, speed))
             return self.speed
 
-    def queue_human_action(self, slot, x, y):
+    def queue_human_action(self, slot, x, y, card_id=None):
         with self.lock:
-            if self.finished:
+            if self.finished or self.stopped.is_set():
                 return {"ok": False, "error": "A partida já terminou."}
-            if slot < 0 or slot >= 4:
-                return {"ok": False, "error": "Slot de carta inválido."}
-            if x < 0 or x >= self.parser.nx or y < 0 or y >= self.parser.ny:
-                return {"ok": False, "error": "Coordenada fora do campo da arena."}
-
-            act = self.parser.encode(slot, x, y)
-            mask = self.obs["blue"]["action_mask"]
-            if not mask[act]:
-                return {"ok": False, "error": "Jogada inválida ou elixir insuficiente para esta carta."}
-
-            self.queued_action = act
-            card_id = self.env.battle_state.players[0].hand[slot]
-            c_name = self.card_names.get(card_id, "Carta")
-            return {
-                "ok": True,
-                "action": int(act),
-                "card": c_name,
-                "pt_card": card_pt_name(c_name),
-                "x": x,
-                "y": y
-            }
+            if self.paused:
+                return {"ok": False, "error": "Retome a partida para jogar."}
+            if self.queued_action is not None:
+                return {"ok": False, "error": "A jogada anterior ainda está na fila."}
+            if not (0 <= slot < HAND_SIZE and 0 <= x < self.parser.nx and 0 <= y < self.parser.ny):
+                return {"ok": False, "error": "Carta ou posição inválida."}
+            action = self.parser.encode(slot, x, y)
+            current_card = self.env.battle_state.players[0].hand[slot]
+            if card_id is not None and card_id != current_card:
+                return {"ok": False, "error": "Sua mão mudou. Selecione a carta novamente."}
+            if not self.obs["blue"]["action_mask"][action]:
+                return {"ok": False, "error": "Posição indisponível ou elixir insuficiente."}
+            self.queued_action = action
+            self.command_id += 1
+            self.command = {"id": self.command_id, "status": "queued"}
+            card = self.card_by_id[current_card].name
+            return {"ok": True, "command_id": self.command_id, "action": action,
+                    "card": card, "pt_card": card_pt_name(card), "x": x, "y": y}
 
     def _decide_ai_action(self):
-        if not self.env.agents:
+        observation = self.obs["red"]
+        if not observation["action_mask"][1:].any():
             return 0
-
-        obs_red = self.obs.get("red")
-        if not obs_red:
-            return 0
-
         if self.policy is not None:
-            try:
-                action, _, _ = self.policy.decide(obs_red, "cpu")
-                return int(action)
-            except Exception as exc:
-                print(f"Policy decision error: {exc}")
-                return 0
-        else:
-            kind = "scripted"
-            if self.model_id == "scripted:hog_push":
-                kind = "hog_push"
-            elif self.model_id == "scripted:rg_patient":
-                kind = "rg_patient"
-            return scripted_move(self.env, 1, obs_red, self.rng, kind)
+            action, _, _ = self.policy.decide(observation, "cpu")
+            return action
+        bot = self.model_id.removeprefix("scripted:")
+        return scripted_move(self.env, 1, observation, self.rng, bot)
 
     def _game_loop(self):
-        while not self.stopped and not self.finished:
-            if self.paused:
-                time.sleep(0.05)
-                continue
-
-            t_start = time.perf_counter()
-
+        while not self.stopped.is_set():
+            began = time.perf_counter()
             with self.lock:
-                if self.finished or not self.env.agents:
-                    break
-
-                # 1. Human action
-                human_act = self.queued_action
-                self.queued_action = 0
-
-                # Verify human action legality again
-                if human_act != 0:
-                    mask = self.obs["blue"]["action_mask"]
-                    if not mask[human_act]:
-                        human_act = 0
-
-                # 2. AI action
-                ai_act = self._decide_ai_action()
-
-                # Record actions
-                state = self.env.battle_state
-                curr_ms = state.tick * state.tick_ms
-                sides_hands = [
-                    [self.card_names.get(c, "—") for c in p.hand]
-                    for p in state.players
-                ]
-                for seat, act in enumerate((human_act, ai_act)):
-                    if act:
-                        move_info = self._format_action(act, seat, sides_hands[seat])
-                        move_info["seat"] = seat
-                        move_info["ms"] = curr_ms
-                        self.recent_moves.append(move_info)
-                        if len(self.recent_moves) > 10:
-                            self.recent_moves.pop(0)
-
-                # 3. Step simulation
-                try:
-                    self.obs, reward, term, trunc, _ = self.env.step({
-                        "blue": human_act,
-                        "red": ai_act
-                    })
-                    self.seq += 1
-
-                    if term.get("blue", False) or trunc.get("blue", False) or not self.env.agents:
+                if self.finished:
+                    return
+                interval = 0.05 if self.paused else PLAY_STEP_MS / (1000 * self.speed)
+                if not self.paused:
+                    try:
+                        self._step()
+                    except Exception as exc:
+                        print(f"Falha no modo batalha: {exc}", flush=True)
                         self.finished = True
-                        winner = self.env.battle_state.winner
-                        self.result = "win" if winner == 0 else ("loss" if winner == 1 else "draw")
-                except Exception as exc:
-                    print(f"Step simulation error: {exc}")
-                    self.finished = True
-                    self.result = "interrupted"
+                        self.result = "interrupted"
+                        if self.queued_action is not None:
+                            self.command = {"id": self.command_id, "status": "refused"}
+                            self.queued_action = None
+            self.stopped.wait(max(0.005, interval - (time.perf_counter() - began)))
 
-            elapsed = time.perf_counter() - t_start
-            step_target = 0.5 / self.speed
-            sleep_time = max(0.015, step_target - elapsed)
-            time.sleep(sleep_time)
+    def _step(self):
+        before = self.env.battle_state
+        now_ms = before.tick * before.tick_ms
+        ai_action = 0
+        if now_ms >= self.next_ai_ms:
+            self.next_ai_ms = now_ms + AI_STEP_MS
+            ai_action = self._decide_ai_action()
+        self.obs, _, term, trunc, _ = self.env.step({
+            "blue": self.queued_action or 0, "red": ai_action,
+        })
+        self.seq += 1
+        if self.queued_action is not None:
+            accepted = any(move.team == 0 and move.status == DeployStatus.OK for move in self.env.last_results)
+            self.command = {"id": self.command_id, "status": "played" if accepted else "refused"}
+            self.queued_action = None
+        for move in self.env.last_results:
+            if move.status == DeployStatus.OK:
+                self.recent_moves.append(self._format_move(move, before.tick_ms))
 
-    def _format_action(self, action, seat, hand):
-        if action == 0:
-            return {"kind": "wait"}
-        if action >= self.parser.n_tile_actions:
-            return {"kind": "ability", "card": "Habilidade", "pt_card": "Habilidade"}
+        if term["blue"] or trunc["blue"]:
+            self.finished = True
+            winner = self.env.battle_state.winner
+            self.result = {0: "win", 1: "loss"}.get(winner, "draw")
 
-        slot, x, y = self.parser.decode(action)
-        if seat == 1:
-            x, y = self.parser.nx - 1 - x, self.parser.ny - 1 - y
-        c_name = hand[slot] if 0 <= slot < len(hand) else "Carta"
-        return {
-            "kind": "card",
-            "card": c_name,
-            "pt_card": card_pt_name(c_name),
-            "x": x + 0.5,
-            "y": y + 0.5,
-            "slot": slot
-        }
+    def _format_move(self, move, tick_ms):
+        base = {"id": f"{self.seq}:{move.team}", "seat": move.team, "ms": move.tick * tick_ms}
+        if move.hand_slot >= HAND_SIZE:
+            return {**base, "kind": "ability", "card": "Habilidade", "pt_card": "Habilidade"}
+        card = self.card_by_id[move.card_id]
+        return {**base, "kind": "card", "card": card.name, "pt_card": card_pt_name(card.name),
+                "card_kind": card.card_kind, "slot": move.hand_slot,
+                "x": round(move.x / self.pitch, 2), "y": round(move.y / self.pitch, 2)}
 
-    def _compute_legal_tiles_by_slot(self, mask):
-        """Precompute valid (x, y) coordinates for all 4 slots in player hand."""
-        tiles = {}
-        for slot in range(4):
-            slot_tiles = []
-            for y in range(self.parser.ny):
-                for x in range(self.parser.nx):
-                    act = self.parser.encode(slot, x, y)
-                    if mask[act]:
-                        slot_tiles.append([x, y])
-            tiles[slot] = slot_tiles
-        return tiles
+    def _hand(self, player):
+        mask = self.obs["blue"]["action_mask"]
+        planes = mask[1:self.parser.n_tile_actions].reshape(self.parser.mask_plane_shape())
+        for slot, (cid, tiles) in enumerate(zip(player.hand, planes, strict=True)):
+            card = self.card_by_id.get(cid)
+            cost = slot_cost(player, slot, card) if card is not None else -1
+            yield {
+                "slot": slot, "id": cid, **self._card_info(cid), "cost": cost,
+                "can_afford": cost >= 0 and player.elixir_milli >= cost * 1000,
+                "legal_tiles": np.argwhere(tiles)[:, ::-1].tolist(),
+            }
+
+    def _card_info(self, cid):
+        card = self.card_by_id.get(cid)
+        if card is None:
+            return {"name": "-", "pt_name": "-", "cost": 0, "kind": None}
+        return {"name": card.name, "pt_name": card_pt_name(card.name),
+                "cost": card.elixir, "kind": card.card_kind}
+
+    @staticmethod
+    def _side_info(player, deck):
+        return {"deck": deck, "deck_label": DECK_LABELS[deck], "crowns": player.crowns,
+                "elixir": player.elixir_milli / 1000, "tower_hp": player.tower_hp,
+                "tower_max_hp": player.tower_max_hp}
 
     def snapshot(self):
         with self.lock:
             state = self.env.battle_state
-            tick = state.tick
-            ms = tick * state.tick_ms
+            ms = state.tick * state.tick_ms
             seconds = ms // 1000
-            clock_str = f"{seconds // 60}:{seconds % 60:02d}"
+            end = state.regular_ticks + (state.overtime_ticks if state.overtime else 0)
+            remaining_ms = max(0, end - state.tick) * state.tick_ms
+            remaining = (remaining_ms + 999) // 1000
+            opening_ms = max(0, self.parser.oracle.rules.deploy_lockout_ticks - state.tick) * state.tick_ms
+            blue, red = state.players
 
-            # Calculate remaining regular match time
-            reg_ticks = getattr(state, "regular_ticks", 3600)
-            rem_ticks = max(0, reg_ticks - tick)
-            rem_sec = rem_ticks // 20
-            rem_clock = f"{rem_sec // 60}:{rem_sec % 60:02d}"
-
-            p0 = state.players[0]
-            p1 = state.players[1]
-
-            mask_blue = self.obs["blue"]["action_mask"] if "blue" in self.obs else np.zeros(self.parser.n_actions)
-            legal_tiles = self._compute_legal_tiles_by_slot(mask_blue)
-
-            # Build human hand info
-            human_hand = []
-            for slot, cid in enumerate(p0.hand):
-                card_obj = self.card_by_id.get(cid)
-                c_name = card_obj.name if card_obj else self.card_names.get(cid, "—")
-                cost = getattr(card_obj, "elixir", p0.hand_costs[slot] if hasattr(p0, "hand_costs") else 0)
-                can_afford = (p0.elixir_milli >= cost * 1000)
-                human_hand.append({
-                    "slot": slot,
-                    "id": cid,
-                    "name": c_name,
-                    "pt_name": card_pt_name(c_name),
-                    "cost": int(cost),
-                    "can_afford": bool(can_afford),
-                    "legal_tiles": legal_tiles.get(slot, []),
-                })
-
-            # Next card
-            next_cid = getattr(p0, "next_card", None)
-            next_card_obj = self.card_by_id.get(next_cid) if next_cid is not None else None
-            next_name = next_card_obj.name if next_card_obj else (self.card_names.get(next_cid) if next_cid is not None else "—")
-            next_card = {
-                "id": next_cid,
-                "name": next_name,
-                "pt_name": card_pt_name(next_name) if next_name != "—" else "—",
-                "cost": int(getattr(next_card_obj, "elixir", 0)) if next_card_obj else 0
-            }
-
-            # AI hand names for display
-            ai_hand = [card_pt_name(self.card_names.get(c, "—")) for c in p1.hand]
-
-            # Board entities (pieces)
-            pieces = []
-            for unit in state.entities:
-                if unit.hp > 0:
-                    u_label = self.unit_names.get(unit.unit_type) or self.card_names.get(unit.card_id, "")
-                    pieces.append([
-                        unit.uid,
-                        unit.team,
-                        unit.kind,
-                        round(unit.x / self.pitch, 2),
-                        round(unit.y / self.pitch, 2),
-                        unit.hp,
-                        unit.max_hp,
-                        unit.target_uid,
-                        u_label
-                    ])
-
+            pieces = [
+                [unit.uid, unit.team, unit.kind, round(unit.x / self.pitch, 2),
+                 round(unit.y / self.pitch, 2), unit.hp, unit.max_hp, unit.target_uid,
+                 self.unit_names.get(unit.unit_type, "")]
+                for unit in state.entities if unit.hp > 0 and (
+                    unit.team == 0 or not ((status_of(unit) or 0) & (STATUS_INVISIBLE | STATUS_UNDERGROUND))
+                )
+            ]
+            shots = [
+                [p.team, round(p.x / self.pitch, 2), round(p.y / self.pitch, 2),
+                 round(p.aim_x / self.pitch, 2), round(p.aim_y / self.pitch, 2), bool(p.splash)]
+                for p in state.projectiles
+            ]
+            spells = [
+                [spell.team, round(spell.x / self.pitch, 2), round(spell.y / self.pitch, 2),
+                 spell.motion, self.card_by_id[spell.card_id].name]
+                for spell in state.spells if spell.card_id in self.card_by_id
+            ]
             return {
-                "id": self.session_id,
-                "seq": self.seq,
-                "status": "finished" if self.finished else ("paused" if self.paused else "running"),
-                "result": self.result,
-                "speed": self.speed,
-                "clock": clock_str,
-                "remaining": rem_clock,
-                "overtime": bool(state.overtime),
-                "ms": ms,
-                "arena": {
-                    "width": self.parser.nx,
-                    "height": self.parser.ny
-                },
-                "human": {
-                    "deck": self.human_deck,
-                    "deck_label": DECK_LABELS.get(self.human_deck, self.human_deck),
-                    "elixir": round(p0.elixir_milli / 1000.0, 1),
-                    "crowns": int(p0.crowns),
-                    "tower_hp": list(p0.tower_hp),
-                    "tower_max_hp": list(p0.tower_max_hp),
-                    "hand": human_hand,
-                    "next_card": next_card
-                },
-                "ai": {
-                    "deck": self.ai_deck,
-                    "deck_label": DECK_LABELS.get(self.ai_deck, self.ai_deck),
-                    "model_id": self.model_id,
-                    "model_label": self.model_label,
-                    "elixir": round(p1.elixir_milli / 1000.0, 1),
-                    "crowns": int(p1.crowns),
-                    "tower_hp": list(p1.tower_hp),
-                    "tower_max_hp": list(p1.tower_max_hp),
-                    "hand": ai_hand
-                },
-                "pieces": pieces,
-                "moves": list(self.recent_moves)
+                "id": self.session_id, "seq": self.seq,
+                "status": "finished" if self.finished else "paused" if self.paused else "running",
+                "result": self.result, "speed": self.speed, "clock": f"{seconds // 60}:{seconds % 60:02d}",
+                "remaining": f"{remaining // 60}:{remaining % 60:02d}", "remaining_ms": remaining_ms,
+                "opening_ms": opening_ms, "elixir_rate": state.elixir_rate, "overtime": state.overtime,
+                "ms": ms, "arena": self.arena, "command": self.command,
+                "human": {**self._side_info(blue, self.human_deck), "hand": list(self._hand(blue)),
+                          "next_card": self._card_info(blue.next_card)},
+                "ai": {"deck": self.ai_deck, "deck_label": DECK_LABELS[self.ai_deck],
+                       "model_id": self.model_id, "model_label": self.model_label, "crowns": red.crowns,
+                       "tower_hp": red.tower_hp, "tower_max_hp": red.tower_max_hp},
+                "pieces": pieces, "shots": shots, "spells": spells, "moves": list(self.recent_moves),
             }
 
 
 class SessionManager:
-    """Singleton manager for the interactive player session."""
+    """Keep a single match and retire its simulation before starting another."""
 
     def __init__(self):
         self._session = None
-        self._lock = threading.Lock()
+        self._lock = Lock()
 
     def get_session(self):
         with self._lock:
@@ -547,21 +433,20 @@ class SessionManager:
 
     def start_session(self, human_deck="hog_26", ai_deck="xbow_30", model_id="scripted:xbow", speed=1.0):
         with self._lock:
-            if self._session:
-                try:
-                    self._session.stop()
-                except Exception:
-                    pass
             session = PlaySession(human_deck, ai_deck, model_id, speed)
+            if self._session is not None:
+                self._session.stop()
             session.start()
             self._session = session
             return session
 
-    def stop_session(self):
+    def stop_session(self, session_id=None):
         with self._lock:
-            if self._session:
-                self._session.stop()
-                self._session = None
+            if self._session is None or (session_id is not None and self._session.session_id != session_id):
+                return False
+            self._session.stop()
+            self._session = None
+            return True
 
 
 ACTIVE_SESSIONS = SessionManager()

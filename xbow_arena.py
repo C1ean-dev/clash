@@ -57,6 +57,7 @@ class ArenaCapture:
         self.last_ms = None
         self.example = None
         self.stream = None
+        self.finished = False
 
     def __enter__(self):
         self.folder.mkdir(parents=True, exist_ok=True)
@@ -71,7 +72,7 @@ class ArenaCapture:
         return self
 
     def __exit__(self, error_type, error, traceback):
-        if error_type:
+        if error_type and not self.finished:
             self.finish({"status": "interrupted"})
         self.stream.close()
 
@@ -84,6 +85,7 @@ class ArenaCapture:
 
     def finish(self, result):
         self.write({"result": result})
+        self.finished = True
 
     def action(self, action, seat, hand):
         if action == 0:

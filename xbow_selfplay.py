@@ -1,8 +1,10 @@
 """Train from a BC checkpoint against frozen rivals and evaluate held-out games."""
 
-from collections import Counter
+from collections import Counter, defaultdict
+from contextlib import ExitStack
 from dataclasses import dataclass
 import hashlib
+from itertools import batched
 import json
 
 import numpy as np
@@ -10,7 +12,7 @@ import torch
 from royalegym.opponents import PatientOpponent, PushOpponent
 from royaleimitate.replays import CARD_NAMES
 
-from xbow_arena import ArenaCapture, arena_enabled
+from xbow_arena import ArenaCapture, KEEP_CLIPS, arena_enabled
 from xbow_environment import battle_env
 from xbow_replays import SEATS
 from xbow_training import frozen_policy, load_checkpoint, optimize_ppo, save_checkpoint
@@ -22,6 +24,17 @@ class Rival:
     name: str
     deck: str
     policy: object = None
+
+
+DEFAULT_PARALLEL_GAMES = 4
+
+
+@dataclass(frozen=True)
+class Match:
+    rival: Rival
+    seat: int
+    seed: int
+    number: int
 
 
 TACTICAL_RIVALS = {
@@ -78,8 +91,8 @@ def advantage_targets(rewards, values, bootstrap, gamma=0.997, gae_lambda=0.95):
     return advantages, advantages + np.asarray(values, dtype=np.float32)
 
 
-def play_game(env, policy, rival, seat, seed, device, collect=False, capture=None):
-    rng = np.random.default_rng([seed, 1 - seat])
+def game_steps(env, policy, seat, seed, device, collect=False, capture=None):
+    """Yield the observations until the wave supplies both decisions for the next step."""
     generators = [None, None] if collect else [
         torch.Generator(device=device).manual_seed(2 * seed + team) for team in (0, 1)
     ]
@@ -88,15 +101,7 @@ def play_game(env, policy, rival, seat, seed, device, collect=False, capture=Non
     spatial, vector, mask, actions, old_logp, rewards, values = [], [], [], [], [], [], []
     reward_total = elixir_trade = lock_count = plays = steps = 0
     while env.agents:
-        if capture:
-            check_training_stop()
-        action, logp, value = policy.decide(obs[own], device, generator=generators[seat])
-        if rival.policy is None:
-            response = scripted_move(env, 1 - seat, obs[other], rng, rival.name)
-        else:
-            response, _, _ = rival.policy.decide(
-                obs[other], device, generator=generators[1 - seat],
-            )
+        (action, logp, value), response = yield obs, generators
         if capture:
             actions_by_side = (action, response) if seat == 0 else (response, action)
             capture.observe(env.battle_state, actions_by_side)
@@ -141,11 +146,84 @@ def play_game(env, policy, rival, seat, seed, device, collect=False, capture=Non
     )
 
 
-def traced_game(output, stage, env, policy, rival, seat, seed, device, *, collect=False, **meta):
-    if not arena_enabled():
-        return play_game(env, policy, rival, seat, seed, device, collect)
-    with ArenaCapture(output, stage, env, rival=rival.name, seat=seat, **meta) as capture:
-        return play_game(env, policy, rival, seat, seed, device, collect, capture)
+@torch.no_grad()
+def decide_batch(policy, inputs, device):
+    if len(inputs) == 1:
+        obs, generator = inputs[0]
+        return [policy.decide(obs, device, generator=generator)]
+    observations, generators = zip(*inputs, strict=True)
+    spatial, vector, mask = [
+        torch.as_tensor(np.stack([obs[key] for obs in observations]), device=device)
+        for key in ("spatial", "vector", "action_mask")
+    ]
+    distribution, values = policy(spatial, vector, mask.bool())
+    if all(generator is None for generator in generators):
+        actions = distribution.sample()
+    else:
+        actions = torch.cat([
+            torch.multinomial(row, 1, generator=generator)
+            for row, generator in zip(distribution.probs, generators, strict=True)
+        ])
+    return list(zip(actions.tolist(), distribution.log_prob(actions).tolist(),
+                    values.tolist(), strict=True))
+
+
+def play_wave(output, stage, policy, matches, environments, device, *, collect=False, **metadata):
+    """Advance independent matches together and batch requests for the same policy."""
+    results = [None] * len(matches)
+    first_captured = max(0, len(matches) - KEEP_CLIPS) if arena_enabled() else len(matches)
+    with ExitStack() as stack:
+        pending = {}
+        for index, (match, env) in enumerate(zip(matches, environments, strict=True)):
+            check_training_stop()
+            capture = None
+            if index >= first_captured:
+                capture = stack.enter_context(ArenaCapture(
+                    output, stage, env, rival=match.rival.name, seat=match.seat,
+                    number=match.number, **metadata,
+                ))
+            game = game_steps(env, policy, match.seat, match.seed, device, collect, capture)
+            rng = np.random.default_rng([match.seed, 1 - match.seat])
+            obs, generators = next(game)
+            pending[index] = (game, rng, obs, generators)
+        while pending:
+            check_training_stop()
+            groups = defaultdict(list)
+            decisions = {index: [None, None] for index in pending}
+            for index, (_, rng, obs, generators) in pending.items():
+                match = matches[index]
+                own, foe = match.seat, 1 - match.seat
+                groups[policy].append((index, own, obs[SEATS[own]], generators[own]))
+                if match.rival.policy is None:
+                    action = scripted_move(environments[index], foe, obs[SEATS[foe]], rng, match.rival.name)
+                    decisions[index][foe] = (action, None, None)
+                else:
+                    groups[match.rival.policy].append((index, foe, obs[SEATS[foe]], generators[foe]))
+            for model, requests in groups.items():
+                predictions = decide_batch(model, [(obs, gen) for _, _, obs, gen in requests], device)
+                for (index, seat, _, _), prediction in zip(requests, predictions, strict=True):
+                    decisions[index][seat] = prediction
+            for index, (game, rng, _, _) in tuple(pending.items()):
+                own = matches[index].seat
+                try:
+                    obs, generators = game.send((decisions[index][own], decisions[index][1 - own][0]))
+                except StopIteration as done:
+                    results[index] = done.value
+                    del pending[index]
+                else:
+                    pending[index] = (game, rng, obs, generators)
+    return results
+
+
+def rollout_tensors(trajectories, device):
+    """Combine one column at a time so the original rollout arrays can be released."""
+    columns = [list(column) for column in zip(*trajectories, strict=True)]
+    trajectories.clear()
+    data = []
+    for column in columns:
+        data.append(torch.as_tensor(np.concatenate(column), device=device))
+        column.clear()
+    return data
 
 
 def summarize(games):
@@ -204,13 +282,25 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
         for path in snapshots[-6:]:
             previous, _ = load_checkpoint(path, args.deck, device)
             league.append(Rival(f"snapshot_{int(path.stem)}", args.deck, frozen_policy(previous)))
-    envs = {}
+    parallel_games = getattr(args, "parallel_games", None) or DEFAULT_PARALLEL_GAMES
+    envs = defaultdict(list)
 
-    def get_env(rival, seat):
-        key = (args.deck, rival.deck) if seat == 0 else (rival.deck, args.deck)
-        if key not in envs:
-            envs[key] = battle_env(*key)
-        return envs[key]
+    def play_matches(stage, tested, matches, *, collect=False, **metadata):
+        for wave in batched(matches, parallel_games):
+            used = Counter()
+            environments = []
+            for match in wave:
+                decks = (args.deck, match.rival.deck)
+                if match.seat == 1:
+                    decks = decks[::-1]
+                slot = used[decks]
+                if slot == len(envs[decks]):
+                    envs[decks].append(battle_env(*decks))
+                environments.append(envs[decks][slot])
+                used[decks] += 1
+            results = play_wave(output, stage, tested, wave, environments, device,
+                                collect=collect, **metadata)
+            yield from zip(wave, results, strict=True)
 
     ppo_metrics = []
     previous_updates = []
@@ -223,32 +313,30 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
         final_update = start_update + args.ppo_updates
         if report_progress and args.ppo_updates:
             report_progress("ppo_start", done=start_update, total=final_update,
-                            resumed=args.resume_ppo)
+                            resumed=args.resume_ppo, parallel_games=min(parallel_games, args.rollout_games))
         for update in range(start_update, final_update):
             games, chunks = [], []
-            rival_counts = Counter()
-            for i in range(args.rollout_games):
-                check_training_stop()
-                rival = league[(update + i) % len(league)]
-                rival_counts[rival.name] += 1
-                seat = (update + i) % 2
-                game, rows = traced_game(
-                    output, "ppo",
-                    get_env(rival, seat), policy, rival, seat,
-                    int(rng.integers(2**31)), device, collect=True, update=update + 1, number=i + 1,
-                )
+            matches = [
+                Match(league[(update + i) % len(league)], (update + i) % 2,
+                      int(rng.integers(2**31)), i + 1)
+                for i in range(args.rollout_games)
+            ]
+            concurrent = min(parallel_games, len(matches))
+            for match, (game, rows) in play_matches("ppo", policy, matches, collect=True, update=update + 1):
                 games.append(game)
                 chunks.append(rows)
                 if report_progress:
                     report_progress("ppo_game", update=update + 1, total=final_update,
-                                    done=i + 1, games=args.rollout_games, rival=rival.name)
-            data = [torch.as_tensor(np.concatenate(column), device=device)
-                    for column in zip(*chunks, strict=True)]
+                                    done=match.number, games=args.rollout_games, rival=match.rival.name,
+                                    parallel_games=concurrent)
+            del rows
+            data = rollout_tensors(chunks, device)
             divergence = optimize_ppo(
                 policy, reference, optimizer, data, args.batch_size, 3, args.kl_coef,
             )
+            del data
             metrics = {**summarize(games), "kl_bc_to_ppo": divergence,
-                       "rivals": dict(rival_counts), "update": update + 1}
+                       "rivals": dict(Counter(match.rival.name for match in matches)), "update": update + 1}
             print(f"PPO {update + 1}/{final_update}: {metrics}", flush=True)
             ppo_metrics.append(metrics)
             save_checkpoint(output / "league" / f"{update + 1:05d}.pt", policy, args.deck,
@@ -260,32 +348,31 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
             })
             league.append(Rival(f"snapshot_{update + 1}", args.deck, frozen_policy(policy)))
             if report_progress:
-                report_progress("ppo_update", done=update + 1, total=final_update, metrics=metrics)
+                report_progress("ppo_update", done=update + 1, total=final_update, metrics=metrics,
+                                parallel_games=concurrent)
             if len(league) > len(rivals) + 6:
                 del league[len(rivals)]
         evaluations = {}
         if args.evaluate:
+            concurrent = min(parallel_games, args.evaluate)
             if report_progress:
                 total = len(evaluation_rivals) * (2 if ppo_metrics or args.evaluate_checkpoint else 1)
-                report_progress("evaluation_start", done=0, total=total)
+                report_progress("evaluation_start", done=0, total=total, parallel_games=concurrent)
             for rival in evaluation_rivals:
                 for label, tested in (("bc", reference), ("ppo", policy)):
                     if label == "ppo" and not (ppo_metrics or args.evaluate_checkpoint):
                         break
-                    games = []
-                    for i in range(args.evaluate):
-                        check_training_stop()
-                        seed = 1_000_000 + args.seed + i // 2
-                        seat = i % 2
-                        games.append(traced_game(
-                            output, "evaluation", get_env(rival, seat), tested, rival, seat, seed,
-                            device, model=label, number=i + 1,
-                        ))
+                    matches = [
+                        Match(rival, i % 2, 1_000_000 + args.seed + i // 2, i + 1)
+                        for i in range(args.evaluate)
+                    ]
+                    games = [game for _, game in play_matches("evaluation", tested, matches, model=label)]
                     name = f"{label}_vs_{rival.name}"
                     evaluations[name] = summarize(games)
                     print(f"{name}: {evaluations[name]}", flush=True)
                     if report_progress:
-                        report_progress("evaluation_pair", done=len(evaluations), total=total)
+                        report_progress("evaluation_pair", done=len(evaluations), total=total,
+                                        parallel_games=concurrent)
         output.mkdir(parents=True, exist_ok=True)
         report = "evaluation.json" if args.evaluate and not ppo_metrics else "selfplay.json"
         (output / report).write_text(
@@ -294,5 +381,6 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
             encoding="utf-8",
         )
     finally:
-        for env in envs.values():
-            env.close()
+        for pool in envs.values():
+            for env in pool:
+                env.close()

@@ -1,739 +1,557 @@
 "use strict";
 
 (() => {
-  const el = id => document.getElementById(`play-${id}`);
+  const el = id => document.getElementById("play-" + id);
   const board = el("board");
+  const {colors, reducedMotion, skin, portraitPosition, spellName, spellCast, castEnds, castVisible,
+    createRenderer} = window.battleArt;
+  const {ctx, begin, ring, stroke, drawPieces, paintSpellArea, drawCastArea, drawCast} = createRenderer(board);
+  const clock = s => Math.floor(s / 60) + ":" + String(s % 60).padStart(2, "0");
 
-  // Audio effects synthesizer using Web Audio API
-  let audioCtx = null;
-  let soundEnabled = true;
+  let state, selected = null, cursor = null, drag = null, pending = null;
+  let legal = [], movesSeen = new Set(), effects = [], spellEffects = [];
+  let pollTimer = 0, frame = 0, lastDraw = 0, failures = 0;
+  let audio, sound = true, pausing = false, feedbackTimer = 0;
+  let motionStart = 0, motionDuration = 1, motionOrigins = new Map(), spellFrameMs = 0;
+  const opening = () => state.opening_ms ?? Math.max(0, 4500 - state.ms);
+  const boardKey = (x, y, width = state.arena.width) => y * width + x;
+
+  function text(node, value) {
+    if (node.textContent !== value) node.textContent = value;
+  }
+
+  function hint() {
+    if (state?.status === "finished") return "";
+    if (state?.status === "paused") return "Retome a partida para jogar.";
+    if (pending) return "Posicionando " + pending.name + "…";
+    if (selected !== null) {
+      const card = state.human.hand[selected];
+      const tip = {Log: "aponte para ver a faixa do rolamento.", Fireball: "aponte para ver a área de impacto."};
+      return card.pt_name + " · " + (tip[card.name] || "escolha uma casa destacada.");
+    }
+    return "Arraste uma carta ou selecione com 1–4 e escolha a casa.";
+  }
+
+  function message(value, error = false) {
+    clearTimeout(feedbackTimer);
+    const node = el("feedback");
+    node.toggleAttribute("data-error", error);
+    text(node, value);
+    if (error) feedbackTimer = setTimeout(() => message(hint()), 3200);
+  }
 
   function initAudio() {
-    if (!audioCtx) {
-      const AudioContextClass = window.AudioContext || window.webkitAudioContext;
-      if (AudioContextClass) audioCtx = new AudioContextClass();
-    }
-    if (audioCtx && audioCtx.state === "suspended") {
-      audioCtx.resume();
-    }
+    const Audio = window.AudioContext || window.webkitAudioContext;
+    if (sound && !audio && Audio) audio = new Audio();
+    if (sound && audio?.state === "suspended") audio.resume().catch(() => {});
   }
 
-  function playTone(freq, duration, type = "sine", gainVal = 0.15) {
-    if (!soundEnabled || !audioCtx) return;
-    try {
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = type;
-      osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
-      gain.gain.setValueAtTime(gainVal, audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      osc.start();
-      osc.stop(audioCtx.currentTime + duration);
-    } catch (_) {}
+  function tone(from, to, duration) {
+    if (!sound || audio?.state !== "running") return;
+    const oscillator = audio.createOscillator();
+    const gain = audio.createGain();
+    const now = audio.currentTime;
+    oscillator.type = "triangle";
+    oscillator.frequency.setValueAtTime(from, now);
+    oscillator.frequency.exponentialRampToValueAtTime(to, now + duration);
+    gain.gain.setValueAtTime(.07, now);
+    gain.gain.exponentialRampToValueAtTime(.001, now + duration);
+    oscillator.connect(gain).connect(audio.destination);
+    oscillator.start(now);
+    oscillator.stop(now + duration);
   }
 
-  function playSelectSound() {
-    initAudio();
-    playTone(520, 0.08, "triangle", 0.12);
-    setTimeout(() => playTone(680, 0.1, "sine", 0.15), 50);
+  async function api(route, payload) {
+    const options = payload ? {
+      method: "POST", headers: {"Content-Type": "application/json"}, body: JSON.stringify(payload)
+    } : {cache: "no-store"};
+    const response = await fetch("/api/play/" + route, options);
+    const data = await response.json();
+    if (!response.ok || data.ok === false) throw new Error(data.error || "Falha na comunicação com a arena.");
+    return data;
   }
 
-  function playDeploySound() {
-    initAudio();
-    if (!soundEnabled || !audioCtx) return;
-    try {
-      const osc = audioCtx.createOscillator();
-      const gain = audioCtx.createGain();
-      osc.type = "sine";
-      osc.frequency.setValueAtTime(260, audioCtx.currentTime);
-      osc.frequency.exponentialRampToValueAtTime(60, audioCtx.currentTime + 0.22);
-      gain.gain.setValueAtTime(0.25, audioCtx.currentTime);
-      gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + 0.22);
-      osc.connect(gain);
-      gain.connect(audioCtx.destination);
-      osc.start();
-      osc.stop(audioCtx.currentTime + 0.22);
-    } catch (_) {}
-  }
-
-  function playErrorSound() {
-    initAudio();
-    playTone(180, 0.15, "sawtooth", 0.15);
-  }
-
-  function playFanfareSound(win) {
-    initAudio();
-    if (!soundEnabled || !audioCtx) return;
-    const notes = win ? [523.25, 659.25, 783.99, 1046.50] : [440, 370, 311, 220];
-    notes.forEach((freq, idx) => {
-      setTimeout(() => playTone(freq, 0.35, "triangle", 0.2), idx * 160);
-    });
-  }
-
-  // State management
-  let activeSessionId = null;
-  let currentState = null;
-  let previousState = null;
-  let lastStateTime = 0;
-  let pollTimer = null;
-  let animFrameId = null;
-
-  let selectedSlot = null; // 0, 1, 2, 3 or null
-  let hoveredTile = null;  // { x, y, legal: bool }
-  let ripples = [];        // local placement visual effects [{x, y, radius, alpha, color}]
-
-  const tones = ["#8bceff", "#ffa7ab"]; // Blue (human), Red (AI)
-
-  // Load available models and populates select dropdown
   async function loadModels() {
     try {
-      const res = await fetch("/api/play/models");
-      if (!res.ok) return;
-      const data = await res.json();
-      const picker = el("ai-model");
-      picker.innerHTML = "";
-
-      const ckptGroup = document.createElement("optgroup");
-      ckptGroup.label = "🧠 Modelos Treinados (PPO / BC)";
-
-      const botGroup = document.createElement("optgroup");
-      botGroup.label = "🤖 Bots Táticos de Regras";
-
-      let tacticalPpoFound = false;
-
-      (data.models || []).forEach(m => {
-        const opt = document.createElement("option");
-        opt.value = m.id;
-        opt.textContent = m.label;
-        if (m.kind === "checkpoint") {
-          ckptGroup.appendChild(opt);
-          if (m.id.includes("tactical/xbow_30/ppo.pt") && !tacticalPpoFound) {
-            opt.selected = true;
-            tacticalPpoFound = true;
-          }
-        } else {
-          botGroup.appendChild(opt);
-        }
-      });
-
-      if (ckptGroup.children.length) picker.appendChild(ckptGroup);
-      if (botGroup.children.length) picker.appendChild(botGroup);
-
-      if (!tacticalPpoFound && picker.options.length) {
-        picker.selectedIndex = 0;
-      }
-    } catch (err) {
-      console.warn("Falha ao carregar modelos:", err);
+      const {models} = await api("models");
+      const groups = Object.fromEntries(["checkpoint", "scripted"].map(kind => [kind, document.createElement("optgroup")]));
+      groups.checkpoint.label = "Modelos treinados";
+      groups.scripted.label = "Bots táticos";
+      for (const model of models) groups[model.kind]?.append(new Option(model.label, model.id));
+      const options = Object.values(groups).filter(group => group.children.length);
+      if (!options.length) return;
+      el("ai-model").replaceChildren(...options);
+      const preferred = models.find(model => model.id === "ckpt:tactical/xbow_30/ppo.pt");
+      if (preferred) el("ai-model").value = preferred.id;
+    } catch {
+      text(el("setup-message"), "Lista de modelos indisponível. O bot tático continua na seleção.");
     }
   }
 
-  // Start new battle
-  async function startBattle(event) {
-    if (event) event.preventDefault();
+  async function start(event) {
+    event?.preventDefault();
+    const button = el("start-btn");
+    if (button.disabled) return;
     initAudio();
-
-    const humanDeck = el("human-deck").value;
-    const modelId = el("ai-model").value;
-    const speed = parseFloat(el("speed").value) || 1.0;
-
-    const startBtn = el("start-btn");
-    startBtn.disabled = true;
-    startBtn.textContent = "Preparando Arena...";
-
+    button.disabled = el("rematch-btn").disabled = true;
+    text(button, "Preparando…");
+    text(el("setup-message"), "");
+    el("setup-message").removeAttribute("data-error");
     try {
-      const res = await fetch("/api/play/start", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          human_deck: humanDeck,
-          model_id: modelId,
-          speed: speed
-        })
+      const data = await api("start", {
+        human_deck: el("human-deck").value, model_id: el("ai-model").value,
+        speed: Number(el(state ? "live-speed" : "speed").value)
       });
-
-      if (!res.ok) {
-        const err = await res.json();
-        alert(err.error || "Erro ao iniciar partida.");
-        startBtn.disabled = false;
-        startBtn.textContent = "⚔️ Iniciar Batalha";
-        return;
-      }
-
-      const data = await res.json();
-      activeSessionId = data.session_id;
-      currentState = data.state;
-      previousState = data.state;
-      lastStateTime = performance.now();
-
-      // Switch views
-      el("setup").hidden = true;
+      clearTimeout(pollTimer);
+      state = selected = cursor = drag = pending = null;
+      movesSeen = new Set();
+      effects = [];
+      spellEffects = [];
+      failures = 0;
+      el("setup").hidden = el("end-modal").hidden = true;
       el("arena-area").hidden = false;
-      el("end-modal").hidden = true;
-      el("badge").textContent = "Em Batalha";
-      el("badge").style.borderColor = "var(--bc)";
-      el("badge").style.color = "var(--bc)";
-      el("live-speed").value = String(speed);
-
-      selectedSlot = null;
-      hoveredTile = null;
-      ripples = [];
-
-      startPolling();
-      if (!animFrameId) animFrameId = requestAnimationFrame(renderLoop);
-    } catch (err) {
-      console.error(err);
-      alert("Falha de conexão com o servidor do jogo.");
+      el("live-speed").value = String(data.state.speed);
+      update(data.state, true);
+      message(hint());
+      el("stage").scrollIntoView({block: "start"});
+      board.focus({preventScroll: true});
+      if (state.status !== "finished") pollTimer = setTimeout(() => poll(data.state.id), 90);
+      if (!frame) frame = requestAnimationFrame(render);
+    } catch (error) {
+      const node = el(state ? "result-detail" : "setup-message");
+      node.setAttribute("data-error", "");
+      text(node, error.message);
     } finally {
-      startBtn.disabled = false;
-      startBtn.textContent = "⚔️ Iniciar Batalha";
+      button.disabled = el("rematch-btn").disabled = false;
+      text(button, "Iniciar batalha");
     }
   }
 
-  // State Polling
-  function startPolling() {
-    stopPolling();
-    pollTimer = setInterval(pollState, 140);
-  }
-
-  function stopPolling() {
-    if (pollTimer) {
-      clearInterval(pollTimer);
-      pollTimer = null;
-    }
-  }
-
-  async function pollState() {
-    if (!activeSessionId) return;
+  async function poll(id) {
+    if (state?.id !== id || state.status === "finished") return;
     try {
-      const res = await fetch("/api/play/state");
-      if (!res.ok) return;
-      const data = await res.json();
-      if (!data.active || !data.state) {
-        activeSessionId = null;
-        stopPolling();
+      const data = await api("state");
+      if (state?.id !== id) return;
+      if (!data.active || data.state.id !== id) {
+        update({...state, status: "finished", result: "interrupted"});
         return;
       }
-
-      previousState = currentState || data.state;
-      currentState = data.state;
-      lastStateTime = performance.now();
-
-      updateHud(currentState);
-
-      if (currentState.status === "finished") {
-        stopPolling();
-        showEndGame(currentState);
+      if (failures >= 2) message(hint());
+      failures = 0;
+      update(data.state);
+    } catch {
+      if (state?.id === id && ++failures === 2) message("Reconectando à partida…", true);
+    } finally {
+      if (state?.id === id && state.status !== "finished") {
+        pollTimer = setTimeout(() => poll(id), failures ? 500 : 90);
       }
-    } catch (err) {
-      console.warn("Erro ao buscar estado:", err);
     }
   }
 
-  // HUD and UI Updates
-  function updateHud(state) {
-    if (!state) return;
-
-    // Clock and phase
-    el("clock").textContent = state.remaining || state.clock;
-    el("clock-phase").textContent = state.overtime ? "⚡ Morte Súbita! (Elixir 2×)" : "Tempo Normal";
-    el("clock-phase").style.color = state.overtime ? "var(--warning)" : "var(--muted)";
-
-    // Opening overlay (first ~4.5 seconds before deploy becomes legal)
-    const isOpening = state.ms < 4500;
-    el("opening-overlay").hidden = !isOpening;
-
-    // Human side
-    const human = state.human;
-    el("human-name").textContent = `${human.deck_label || "Você"}`;
-    el("human-crowns").textContent = `${human.crowns} 👑`;
-    el("human-towers").textContent = `Torres: ${human.tower_hp.map(v => Math.max(0, v)).join(" · ")} PV`;
-
-    // AI side
-    const ai = state.ai;
-    el("ai-name").textContent = `${ai.model_label || "IA"}`;
-    el("ai-crowns").textContent = `👑 ${ai.crowns}`;
-    el("ai-towers").textContent = `Torres: ${ai.tower_hp.map(v => Math.max(0, v)).join(" · ")} PV`;
-
-    // Elixir bar
-    const elixir = Math.min(10, Math.max(0, human.elixir));
-    el("elixir-val").textContent = `${elixir.toFixed(1)} / 10 💧`;
-    el("elixir-fill").style.width = `${(elixir / 10) * 100}%`;
-
-    // Render Cards in Hand
-    renderHand(human.hand, elixir);
-
-    // Render Next Card
-    const next = human.next_card;
-    if (next && next.name !== "—") {
-      el("next-card").innerHTML = `
-        <span class="cost-drop">${next.cost} 💧</span>
-        <span class="card-name">${next.pt_name || next.name}</span>
-      `;
-    } else {
-      el("next-card").textContent = "—";
+  function update(next, initial = false) {
+    const before = state;
+    if (before && next.seq < before.seq) return;
+    const now = performance.now();
+    if (!before || before.ms !== next.ms) {
+      motionOrigins = new Map((before?.pieces || []).map(piece => [piece[0], position(piece, now)]));
+      motionDuration = Math.min(360, Math.max(80, (next.ms - (before?.ms ?? next.ms)) / next.speed));
+      motionStart = now;
+      spellFrameMs = Math.min(500, Math.max(0, next.ms - (before?.ms ?? next.ms)));
+      legal = next.human.hand.map(card =>
+        new Set(card.legal_tiles.map(([x, y]) => boardKey(x, y, next.arena.width))));
     }
-
-    // Moves Feed
-    renderMoves(state.moves || []);
+    state = next;
+    if (selected !== null && before?.human.hand[selected].id !== next.human.hand[selected].id) {
+      selected = cursor = null;
+      message(hint());
+    }
+    const moveKey = move => move.id ?? move.seat + ":" + move.ms;
+    const newMoves = next.moves.filter(move => !movesSeen.has(moveKey(move)));
+    movesSeen = new Set(next.moves.map(moveKey));
+    if (!initial) for (const move of newMoves) {
+      if (move.kind !== "card") continue;
+      const cast = spellCast(move, state);
+      if (cast) spellEffects.push(cast);
+      else effects.push({...move, started: now});
+      if (!move.seat) tone(265, 85, .2);
+    }
+    if (newMoves.length || initial) showMoves(next.moves);
+    if (pending) {
+      const played = newMoves.some(move => move.seat === 0 && move.slot === pending.slot && move.ms >= pending.ms);
+      const refused = next.command?.id === pending.commandId && next.command?.status === "refused";
+      if (played || refused || next.status === "finished" || now - pending.started > 1800) {
+        pending = null;
+        message(refused ? "A posição deixou de estar disponível." : hint(), refused);
+      }
+    }
+    hud();
+    if (next.status === "finished" && before?.status !== "finished") showResult();
   }
 
-  function renderHand(hand, currentElixir) {
-    const container = el("hand");
-    container.innerHTML = "";
+  function makeToken(node, nameVisible) {
+    const parts = ["card-cost", "card-emblem", "card-title"].map(className =>
+      Object.assign(document.createElement("span"), {className}));
+    node.append(...parts.slice(0, nameVisible ? 3 : 2));
+    return {node, cost: parts[0], emblem: parts[1], name: parts[2], id: null};
+  }
 
-    hand.forEach((card, slot) => {
-      const cardEl = document.createElement("button");
-      cardEl.type = "button";
-      cardEl.className = "battle-card";
-      const isSelected = (selectedSlot === slot);
-      const canAfford = card.can_afford && (currentElixir >= card.cost);
+  const nextToken = makeToken(el("next-card"), false);
+  const tokens = Array.from({length: 4}, (_, slot) => {
+    const node = Object.assign(document.createElement("button"), {type: "button", className: "battle-card"});
+    node.setAttribute("aria-keyshortcuts", String(slot + 1));
+    const token = makeToken(node, true);
+    const key = Object.assign(document.createElement("span"), {className: "card-hotkey", textContent: slot + 1});
+    key.setAttribute("aria-hidden", "true");
+    node.append(key);
+    el("hand").append(node);
+    node.addEventListener("pointerdown", event => beginDrag(event, slot));
+    node.addEventListener("pointermove", moveDrag);
+    node.addEventListener("pointerup", endDrag);
+    node.addEventListener("pointercancel", cancelDrag);
+    node.addEventListener("lostpointercapture", cancelDrag);
+    node.addEventListener("click", event => { if (event.detail === 0) choose(slot, true); });
+    return token;
+  });
 
-      if (isSelected) cardEl.classList.add("selected");
-      if (!canAfford) cardEl.classList.add("disabled");
+  function updateCard(token, card) {
+    const name = card.pt_name || card.name;
+    if (token.id !== card.id || token.name.textContent !== name) {
+      const [glyph, tint, portrait] = skin(card.name);
+      token.node.toggleAttribute("data-spent", token.id !== null && !token.node.hasAttribute("data-spent"));
+      token.id = card.id;
+      token.node.style.setProperty("--card-tone", tint);
+      text(token.name, name);
+      text(token.emblem, glyph);
+      token.emblem.toggleAttribute("data-portrait", portrait !== undefined);
+      if (portrait !== undefined) token.emblem.style.backgroundPosition = portraitPosition(portrait);
+    }
+    text(token.cost, card.cost < 0 ? "–" : String(card.cost));
+    const title = name + " · " + token.cost.textContent + " de elixir";
+    if (token.node.title !== title) {
+      token.node.title = title;
+      token.node.setAttribute("aria-label", title);
+    }
+  }
 
-      cardEl.innerHTML = `
-        <div class="card-top">
-          <span class="card-hotkey">[${slot + 1}]</span>
-          <span class="card-cost">${card.cost} 💧</span>
-        </div>
-        <div class="card-title">${card.pt_name || card.name}</div>
-        <div class="card-status-pill">${isSelected ? "Selecionada" : (canAfford ? "Pronta" : "Falta Elixir")}</div>
-      `;
-
-      cardEl.addEventListener("click", () => {
-        if (!canAfford) {
-          playErrorSound();
-          return;
-        }
-        if (selectedSlot === slot) {
-          selectedSlot = null; // deselect
-        } else {
-          selectedSlot = slot;
-          playSelectSound();
-        }
-        renderHand(hand, currentElixir);
-      });
-
-      container.appendChild(cardEl);
+  function selection() {
+    tokens.forEach((token, slot) => {
+      token.node.setAttribute("aria-pressed", String(slot === selected));
+      token.node.setAttribute("aria-disabled", String(state.status !== "running" || !!pending || !legal[slot]?.size));
     });
+    board.toggleAttribute("data-aiming", selected !== null);
   }
 
-  function renderMoves(moves) {
-    const list = el("moves-list");
-    if (!moves.length) {
-      list.innerHTML = "<li>Aguardando primeira jogada...</li>";
-      return;
-    }
+  function hud() {
+    const {human, ai, status} = state;
+    const rate = state.elixir_rate ?? (state.overtime || state.ms >= 120000 ? 2 : 1);
+    const remaining = state.remaining_ms == null && state.overtime
+      ? clock(Math.max(0, 300 - Math.floor(state.ms / 1000))) : state.remaining;
+    text(el("clock"), remaining || state.clock);
+    text(el("clock-phase"), [state.overtime && "Prorrogação", rate > 1 && rate + "× elixir"].filter(Boolean).join(" · "));
+    text(el("human-name"), human.deck_label.split(" (")[0]);
+    text(el("ai-name"), ai.model_label);
+    text(el("human-crowns"), String(human.crowns));
+    text(el("ai-crowns"), String(ai.crowns));
+    text(el("badge"), status === "paused" ? "Pausada" : status === "finished" ? "Encerrada" : "Em batalha");
+    text(el("pause-btn"), status === "paused" ? "Retomar" : "Pausar");
+    el("pause-btn").disabled = pausing || status === "finished";
+    el("live-speed").disabled = status === "finished";
+    text(el("elixir-val"), human.elixir.toFixed(1).replace(".", ",") + " / 10");
+    el("elixir-fill").style.transform = "scaleX(" + Math.min(1, human.elixir / 10) + ")";
+    human.hand.forEach((card, slot) => updateCard(tokens[slot], card));
+    updateCard(nextToken, human.next_card);
+    selection();
+    el("opening-overlay").hidden = status === "finished" || (!opening() && status !== "paused");
+    text(el("opening-overlay"), status === "paused" ? "Partida pausada" : "Abertura · " + Math.ceil(opening() / 1000) + " s");
+  }
 
-    const items = moves.slice(-6).map(m => {
-      const isHuman = (m.seat === 0);
-      const who = isHuman ? "Você" : "IA";
-      const teamClass = isHuman ? "human-move" : "ai-move";
-      const timeStr = `${Math.floor(m.ms / 60000)}:${String(Math.floor((m.ms % 60000) / 1000)).padStart(2, "0")}`;
-      let detail = m.kind === "card"
-        ? `${m.pt_card || m.card} (${Math.floor(m.x)}, ${Math.floor(m.y)})`
-        : (m.kind === "ability" ? "Habilidade ativada" : "Esperar");
-
-      return `<li class="${teamClass}"><span><strong>${who}:</strong> ${detail}</span><time>${timeStr}</time></li>`;
+  function showMoves(moves) {
+    const rows = moves.slice(-5).reverse().map(move => {
+      const li = document.createElement("li");
+      const name = document.createElement("span");
+      name.className = move.seat ? "ai-move" : "human-move";
+      name.textContent = (move.seat ? "IA" : "Você") + " · " + (move.pt_card || move.card);
+      const time = document.createElement("time");
+      time.textContent = clock(Math.floor(move.ms / 1000));
+      li.append(name, time);
+      return li;
     });
-
-    list.innerHTML = items.join("");
+    if (!rows.length) rows.push(Object.assign(document.createElement("li"), {textContent: "Aguardando a primeira jogada."}));
+    el("moves-list").replaceChildren(...rows);
   }
 
-  // End Game Modal
-  function showEndGame(state) {
+  function showResult() {
+    const names = {win: "Vitória", loss: "Derrota", draw: "Empate", interrupted: "Partida interrompida"};
+    text(el("result-title"), names[state.result]);
+    text(el("result-detail"), "Você " + state.human.crowns + " × " + state.ai.crowns + " IA · " + state.clock);
     el("end-modal").hidden = false;
-    const isWin = (state.result === "win");
-    const isLoss = (state.result === "loss");
-
-    playFanfareSound(isWin);
-
-    el("result-title").textContent = isWin ? "🏆 VITÓRIA!" : (isLoss ? "💀 DERROTA!" : "🤝 EMPATE!");
-    el("result-title").style.color = isWin ? "var(--bc)" : (isLoss ? "#ff7c82" : "var(--warning)");
-    el("result-detail").textContent = isWin
-      ? "Parabéns! Sua estratégia superou a rede neural da IA!"
-      : (isLoss ? "A IA prevaleceu desta vez. Ajuste sua tática e tente novamente!" : "Uma batalha equilibrada até o último segundo!");
-
-    el("result-stats").innerHTML = `
-      <div class="end-stat-box"><span>Suas Coroas</span><strong>${state.human.crowns} 👑</strong></div>
-      <div class="end-stat-box"><span>Coroas da IA</span><strong>${state.ai.crowns} 👑</strong></div>
-      <div class="end-stat-box"><span>Duração</span><strong>${state.clock}</strong></div>
-    `;
-
-    el("badge").textContent = isWin ? "Vitória!" : (isLoss ? "Derrota" : "Empate");
-    el("badge").style.borderColor = isWin ? "var(--bc)" : "#ff7c82";
-    el("badge").style.color = isWin ? "var(--bc)" : "#ff7c82";
+    el("rematch-btn").focus({preventScroll: true});
+    if (state.result !== "interrupted") tone(400, state.result === "win" ? 710 : 210, .32);
   }
 
-  // Canvas Drawing & Animation Loop
-  function renderLoop(now) {
-    animFrameId = requestAnimationFrame(renderLoop);
-    if (!currentState || el("arena-area").hidden) return;
-
-    drawBoard(now);
+  function choose(slot, toggle = false) {
+    if (!state || state.status === "finished") return false;
+    const card = state.human.hand[slot];
+    if (state.status !== "running" || pending || !legal[slot]?.size) {
+      const reasons = [
+        [state.status === "paused", "Retome a partida para jogar."],
+        [pending, "Aguardando a jogada anterior."],
+        [opening(), "Aguarde o fim da abertura."],
+        [!card.can_afford && card.cost >= 0, "Você precisa de " + card.cost + " de elixir."]
+      ];
+      message(reasons.find(([condition]) => condition)?.[1] || "Essa carta está indisponível.", true);
+      return false;
+    }
+    initAudio();
+    if (selected !== slot) tone(390, 540, .08);
+    selected = toggle && selected === slot ? null : slot;
+    selection();
+    message(hint());
+    return true;
   }
 
-  function drawBoard(now) {
-    if (!board) return;
-    const { width, height } = (currentState.arena || { width: 18, height: 32 });
-    const viewWidth = board.clientWidth;
-    const viewHeight = board.clientHeight;
-    const pixelRatio = window.devicePixelRatio || 1;
-
-    if (!viewWidth || !viewHeight) return;
-
-    if (board.width !== Math.round(viewWidth * pixelRatio) || board.height !== Math.round(viewHeight * pixelRatio)) {
-      board.width = Math.round(viewWidth * pixelRatio);
-      board.height = Math.round(viewHeight * pixelRatio);
-    }
-
-    const ctx = board.getContext("2d");
-    ctx.setTransform(board.width / width, 0, 0, board.height / height, 0, 0);
-
-    // 1. Arena Background
-    // Bottom (Human side)
-    ctx.fillStyle = "#2d493a";
-    ctx.fillRect(0, height / 2, width, height / 2);
-
-    // Top (AI side)
-    ctx.fillStyle = "#324e41";
-    ctx.fillRect(0, 0, width, height / 2);
-
-    // Grid lines
-    ctx.fillStyle = "#abc8a510";
-    for (let x = 1; x < width; x++) ctx.fillRect(x, 0, 0.045, height);
-    for (let y = 1; y < height; y++) ctx.fillRect(0, y, width, 0.045);
-
-    // River
-    ctx.fillStyle = "#244756";
-    ctx.fillRect(0, height / 2 - 1, width, 2);
-
-    // Bridges
-    const bridges = [2.5, width - 5.5];
-    ctx.fillStyle = "#b39464";
-    for (const left of bridges) {
-      ctx.fillRect(left, height / 2 - 1.15, 3, 2.3);
-      ctx.fillStyle = "#705942";
-      for (let row = -1; row <= 1; row += 0.4) {
-        ctx.fillRect(left, height / 2 + row, 3, 0.06);
-      }
-      ctx.fillStyle = "#b39464";
-    }
-
-    // River banks lines
-    ctx.strokeStyle = "#466c75";
-    ctx.lineWidth = 0.08;
-    ctx.beginPath();
-    ctx.moveTo(0, height / 2 - 1);
-    ctx.lineTo(width, height / 2 - 1);
-    ctx.moveTo(0, height / 2 + 1);
-    ctx.lineTo(width, height / 2 + 1);
-    ctx.stroke();
-
-    // 2. Legal Placement Overlay when a card is selected
-    if (selectedSlot !== null && currentState.human && currentState.human.hand) {
-      const card = currentState.human.hand[selectedSlot];
-      if (card && card.legal_tiles) {
-        ctx.fillStyle = "#36e39818";
-        for (const [lx, ly] of card.legal_tiles) {
-          const sy = height - 1 - ly;
-          ctx.fillRect(lx + 0.05, sy + 0.05, 0.9, 0.9);
-        }
-      }
-    }
-
-    // 3. Interpolate and Draw Pieces (troops, buildings, towers)
-    const prevMap = new Map((previousState?.pieces || []).map(p => [p[0], p]));
-    const dt = Math.max(1, Math.min(500, now - lastStateTime));
-    const ratio = Math.min(1.0, dt / 500);
-
-    const pieces = (currentState.pieces || []).map(p => {
-      const prev = prevMap.get(p[0]);
-      if (!prev) return p;
-      const copy = p.slice();
-      copy[3] = prev[3] + (p[3] - prev[3]) * ratio;
-      copy[4] = prev[4] + (p[4] - prev[4]) * ratio;
-      return copy;
-    });
-
-    const positions = new Map(pieces.map(p => [p[0], p]));
-
-    ctx.textAlign = "center";
-    ctx.textBaseline = "middle";
-
-    for (const [, seat, kind, x, y, hp, maxHp, target, unit] of pieces) {
-      const screenY = height - y;
-      const tower = kind >= 2;
-      const isKing = kind === 2;
-      const radius = isKing ? 1.25 : (tower ? 1.05 : (kind === 1 ? 0.72 : 0.42));
-
-      // X-Bow targeting laser beam
-      if (/x.?bow/i.test(unit) && positions.has(target)) {
-        const enemy = positions.get(target);
-        ctx.beginPath();
-        ctx.moveTo(x, screenY);
-        ctx.lineTo(enemy[3], height - enemy[4]);
-        ctx.strokeStyle = tones[seat];
-        ctx.lineWidth = 0.12;
-        ctx.stroke();
-      }
-
-      // Base unit circle / square
-      ctx.fillStyle = tones[seat];
-      ctx.strokeStyle = "#101920";
-      ctx.lineWidth = 0.14;
-
-      ctx.beginPath();
-      if (kind >= 1) {
-        ctx.rect(x - radius, screenY - radius, radius * 2, radius * 2);
-      } else {
-        ctx.arc(x, screenY, radius, 0, Math.PI * 2);
-      }
-      ctx.fill();
-      ctx.stroke();
-
-      // Unit Label / Initials
-      ctx.fillStyle = "#111b24";
-      ctx.font = `bold ${tower ? 0.58 : 0.4}px system-ui`;
-      let text = "";
-      if (isKing) {
-        text = "👑 REI";
-      } else if (kind === 3) {
-        text = "TORRE";
-      } else {
-        text = unit.split(/[ -]/).filter(Boolean).map(w => w[0]).join("").slice(0, 2).toUpperCase();
-      }
-      ctx.fillText(text, x, screenY);
-
-      // Hitpoints Bar
-      const barW = radius * 2.15;
-      const barH = 0.18;
-      const barY = screenY - radius - 0.32;
-      ctx.fillStyle = "#121b22";
-      ctx.fillRect(x - barW / 2, barY, barW, barH);
-      ctx.fillStyle = tones[seat];
-      const fillW = barW * Math.min(1.0, Math.max(0, hp / Math.max(1, maxHp)));
-      ctx.fillRect(x - barW / 2, barY, fillW, barH);
-    }
-
-    // 4. Placement Ripples
-    for (let i = ripples.length - 1; i >= 0; i--) {
-      const rip = ripples[i];
-      rip.radius += 0.12;
-      rip.alpha -= 0.04;
-      if (rip.alpha <= 0) {
-        ripples.splice(i, 1);
-        continue;
-      }
-      ctx.strokeStyle = `rgba(139, 206, 255, ${rip.alpha})`;
-      ctx.lineWidth = 0.12;
-      ctx.beginPath();
-      ctx.arc(rip.x, height - rip.y, rip.radius, 0, Math.PI * 2);
-      ctx.stroke();
-    }
-
-    // 5. Hover Reticle when card is selected
-    if (selectedSlot !== null && hoveredTile && currentState.human) {
-      const card = currentState.human.hand[selectedSlot];
-      const isLegal = hoveredTile.legal;
-      const hx = hoveredTile.x + 0.5;
-      const hy = height - (hoveredTile.y + 0.5);
-
-      ctx.strokeStyle = isLegal ? "#36e398" : "#ff6b72";
-      ctx.fillStyle = isLegal ? "#36e39833" : "#ff6b7233";
-      ctx.lineWidth = 0.12;
-
-      ctx.beginPath();
-      ctx.arc(hx, hy, 0.95, 0, Math.PI * 2);
-      ctx.fill();
-      ctx.stroke();
-
-      // Label preview
-      ctx.fillStyle = "#101720f0";
-      ctx.fillRect(hx - 2.5, hy - 1.8, 5.0, 0.9);
-      ctx.strokeStyle = isLegal ? "#36e398" : "#ff6b72";
-      ctx.strokeRect(hx - 2.5, hy - 1.8, 5.0, 0.9);
-
-      ctx.fillStyle = isLegal ? "#e0ffea" : "#ffd4d6";
-      ctx.font = "bold 0.42px system-ui";
-      const reticleText = isLegal
-        ? `${card.pt_name || card.name} (${card.cost} 💧)`
-        : "⊘ Área Inválida";
-      ctx.fillText(reticleText, hx, hy - 1.35);
-    }
-  }
-
-  // Mouse & Touch Interaction on Canvas
-  function getCanvasTile(evt) {
-    if (!board) return null;
+  function tileAt(event) {
     const rect = board.getBoundingClientRect();
-    const mouseX = evt.clientX - rect.left;
-    const mouseY = evt.clientY - rect.top;
-
-    const tileX = Math.floor((mouseX / rect.width) * 18);
-    const tileY = Math.floor((1 - (mouseY / rect.height)) * 32);
-
-    const clampedX = Math.max(0, Math.min(17, tileX));
-    const clampedY = Math.max(0, Math.min(31, tileY));
-
-    let legal = false;
-    if (selectedSlot !== null && currentState && currentState.human) {
-      const card = currentState.human.hand[selectedSlot];
-      if (card && card.legal_tiles) {
-        legal = card.legal_tiles.some(([lx, ly]) => lx === clampedX && ly === clampedY);
-      }
-    }
-
-    return { x: clampedX, y: clampedY, legal };
+    const {width, height} = state.arena;
+    const x = Math.floor((event.clientX - rect.left) * width / rect.width);
+    const row = Math.floor((event.clientY - rect.top) * height / rect.height);
+    return x >= 0 && x < width && row >= 0 && row < height ? {x, y: height - 1 - row} : null;
   }
 
-  board.addEventListener("mousemove", evt => {
-    if (selectedSlot === null) {
-      hoveredTile = null;
+  const isLegal = tile => tile && selected !== null && legal[selected]?.has(boardKey(tile.x, tile.y));
+
+  async function deploy(tile) {
+    if (!state || selected === null || pending || state.status !== "running") return;
+    if (!isLegal(tile)) {
+      message("Escolha uma casa destacada na arena.", true);
       return;
     }
-    hoveredTile = getCanvasTile(evt);
-  });
-
-  board.addEventListener("mouseleave", () => {
-    hoveredTile = null;
-  });
-
-  board.addEventListener("click", async evt => {
-    if (selectedSlot === null || !currentState) return;
-
-    const tile = getCanvasTile(evt);
-    if (!tile) return;
-
-    const card = currentState.human.hand[selectedSlot];
-    if (!card) return;
-
-    if (!tile.legal) {
-      playErrorSound();
-      return;
-    }
-
-    // Play local deployment effect and sound
-    playDeploySound();
-    ripples.push({ x: tile.x + 0.5, y: tile.y + 0.5, radius: 0.3, alpha: 0.9 });
-
-    const slotToPlay = selectedSlot;
-    selectedSlot = null; // deselect immediately for responsiveness
-
+    const card = state.human.hand[selected];
+    const action = {...tile, slot: selected, ms: state.ms, started: performance.now(),
+      name: card.pt_name, card: card.name};
+    pending = action;
+    selected = cursor = null;
+    selection();
+    message(hint());
     try {
-      const res = await fetch("/api/play/act", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          slot: slotToPlay,
-          x: tile.x,
-          y: tile.y
-        })
-      });
+      const result = await api("act", {slot: action.slot, ...tile, card_id: card.id, session_id: state.id});
+      action.commandId = result.command_id;
+    } catch (error) {
+      if (pending !== action) return;
+      pending = null;
+      if (state.human.hand[action.slot].id === card.id) selected = action.slot;
+      selection();
+      message(error.message, true);
+    }
+  }
 
-      const data = await res.json();
-      if (!data.ok) {
-        console.warn("Deploy recusado:", data.error);
-        playErrorSound();
-      }
-    } catch (err) {
-      console.error("Falha ao enviar jogada:", err);
+  function beginDrag(event, slot) {
+    if (event.button !== 0 || !event.isPrimary) return;
+    const same = selected === slot;
+    if (!choose(slot)) return;
+    drag = {id: event.pointerId, x: event.clientX, y: event.clientY, same, moved: false};
+    event.currentTarget.setPointerCapture(event.pointerId);
+  }
+
+  function moveDrag(event) {
+    if (drag?.id !== event.pointerId) return;
+    if (Math.hypot(event.clientX - drag.x, event.clientY - drag.y) > 7) drag.moved = true;
+    if (drag.moved) cursor = tileAt(event);
+  }
+
+  function endDrag(event) {
+    if (drag?.id !== event.pointerId) return;
+    const {moved, same} = drag;
+    drag = null;
+    if (moved) {
+      const tile = tileAt(event);
+      if (tile) deploy(tile);
+    } else if (same && selected !== null) choose(selected, true);
+  }
+
+  function cancelDrag(event) {
+    if (drag?.id === event.pointerId) drag = cursor = null;
+  }
+
+  board.addEventListener("pointermove", event => { if (state) cursor = tileAt(event); });
+  board.addEventListener("pointerleave", () => { if (!drag) cursor = null; });
+  board.addEventListener("click", event => { if (state) deploy(tileAt(event)); });
+  board.addEventListener("keydown", event => {
+    if (selected === null) return;
+    if (event.key === "Enter" && cursor) deploy(cursor);
+    const delta = {ArrowUp: [0, 1], ArrowDown: [0, -1], ArrowLeft: [-1, 0], ArrowRight: [1, 0]}[event.key];
+    if (!delta) return;
+    event.preventDefault();
+    const {width, height} = state.arena;
+    const tile = cursor || {x: Math.floor(width / 2), y: Math.floor(height / 3)};
+    cursor = {x: Math.max(0, Math.min(width - 1, tile.x + delta[0])),
+      y: Math.max(0, Math.min(height - 1, tile.y + delta[1]))};
+  });
+
+  window.addEventListener("keydown", event => {
+    if (!state || state.status === "finished" || event.repeat || event.ctrlKey || event.metaKey ||
+        event.target.closest?.("input, select, textarea, [contenteditable]")) return;
+    if (/^[1-4]$/.test(event.key)) {
+      event.preventDefault();
+      if (choose(Number(event.key) - 1, true)) board.focus({preventScroll: true});
+    } else if (event.code === "Space" && !event.target.closest?.("button")) {
+      event.preventDefault();
+      el("pause-btn").click();
+    } else if (event.key === "Escape") {
+      selected = cursor = drag = null;
+      selection();
+      message(hint());
     }
   });
 
-  // Action Buttons
   el("pause-btn").addEventListener("click", async () => {
-    if (!activeSessionId) return;
+    if (!state || pausing) return;
+    const id = state.id;
+    pausing = el("pause-btn").disabled = true;
     try {
-      const res = await fetch("/api/play/pause", { method: "POST" });
-      const data = await res.json();
-      el("pause-btn").textContent = data.paused ? "▶️ Retomar" : "⏸️ Pausar";
-    } catch (err) {
-      console.warn(err);
+      const {paused} = await api("pause", {session_id: id, paused: state.status !== "paused"});
+      if (state?.id === id && state.status !== "finished") {
+        update({...state, status: paused ? "paused" : "running"});
+        message(hint());
+      }
+    } catch (error) {
+      message(error.message, true);
+    } finally {
+      pausing = false;
+      el("pause-btn").disabled = state?.status === "finished";
     }
   });
 
-  el("live-speed").addEventListener("change", async evt => {
-    if (!activeSessionId) return;
+  el("live-speed").addEventListener("change", async event => {
+    if (!state) return;
     try {
-      await fetch("/api/play/speed", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ speed: parseFloat(evt.target.value) })
-      });
-    } catch (err) {
-      console.warn(err);
+      await api("speed", {session_id: state.id, speed: Number(event.target.value)});
+    } catch (error) {
+      if (state) event.target.value = String(state.speed);
+      message(error.message, true);
     }
   });
 
   el("sound-btn").addEventListener("click", () => {
-    soundEnabled = !soundEnabled;
-    el("sound-btn").textContent = soundEnabled ? "🔊 Som" : "🔇 Mudo";
-    if (soundEnabled) playSelectSound();
+    sound = !sound;
+    el("sound-btn").setAttribute("aria-pressed", String(sound));
+    text(el("sound-btn"), sound ? "Som" : "Sem som");
+    initAudio();
+    tone(390, 510, .08);
   });
+
+  if (document.fullscreenEnabled) {
+    el("fullscreen-btn").hidden = false;
+    el("fullscreen-btn").addEventListener("click", async () => {
+      try {
+        if (document.fullscreenElement) await document.exitFullscreen();
+        else await el("arena-area").requestFullscreen();
+      } catch {
+        message("Tela cheia indisponível neste navegador.", true);
+      }
+    });
+    document.addEventListener("fullscreenchange", () => {
+      text(el("fullscreen-btn"), document.fullscreenElement ? "Sair da tela cheia" : "Tela cheia");
+    });
+  }
+
+  function backToSetup() {
+    state = null;
+    clearTimeout(pollTimer);
+    cancelAnimationFrame(frame);
+    frame = 0;
+    if (document.fullscreenElement === el("arena-area")) document.exitFullscreen().catch(() => {});
+    el("arena-area").hidden = true;
+    el("setup").hidden = false;
+    text(el("badge"), "Pronto");
+    el("start-btn").focus();
+  }
 
   el("surrender-btn").addEventListener("click", async () => {
-    if (!confirm("Deseja realmente sair da partida?")) return;
-    stopPolling();
+    if (!state) return;
+    if (state.status === "finished") { backToSetup(); return; }
+    const button = el("surrender-btn");
+    button.disabled = true;
     try {
-      await fetch("/api/play/stop", { method: "POST" });
-    } catch (_) {}
-    activeSessionId = null;
-    el("arena-area").hidden = true;
-    el("setup").hidden = false;
-    el("badge").textContent = "Pronto para jogar";
-    el("badge").style.borderColor = "var(--line)";
-    el("badge").style.color = "var(--muted)";
-  });
-
-  el("rematch-btn").addEventListener("click", () => {
-    el("end-modal").hidden = true;
-    startBattle();
-  });
-
-  el("new-match-btn").addEventListener("click", () => {
-    el("end-modal").hidden = true;
-    el("arena-area").hidden = true;
-    el("setup").hidden = false;
-    el("badge").textContent = "Pronto para jogar";
-    el("badge").style.borderColor = "var(--line)";
-    el("badge").style.color = "var(--muted)";
-  });
-
-  // Keyboard Shortcuts
-  window.addEventListener("keydown", evt => {
-    if (el("arena-area").hidden || !currentState) return;
-
-    // Keys 1, 2, 3, 4 select card
-    if (["1", "2", "3", "4"].includes(evt.key)) {
-      const slot = parseInt(evt.key, 10) - 1;
-      const hand = currentState.human?.hand;
-      if (hand && hand[slot]) {
-        const card = hand[slot];
-        if (card.can_afford) {
-          selectedSlot = (selectedSlot === slot ? null : slot);
-          playSelectSound();
-          renderHand(hand, currentState.human.elixir);
-        } else {
-          playErrorSound();
-        }
-      }
-    } else if (evt.code === "Space") {
-      evt.preventDefault();
-      el("pause-btn").click();
-    } else if (evt.key === "Escape") {
-      selectedSlot = null;
-      if (currentState.human) {
-        renderHand(currentState.human.hand, currentState.human.elixir);
-      }
+      await api("stop", {session_id: state.id});
+      backToSetup();
+    } catch (error) {
+      message(error.message, true);
+    } finally {
+      button.disabled = false;
     }
   });
-
-  // Form submission
-  el("form").addEventListener("submit", startBattle);
-
-  // Initialize
+  el("rematch-btn").addEventListener("click", start);
+  el("new-match-btn").addEventListener("click", backToSetup);
+  el("form").addEventListener("submit", start);
   loadModels();
+
+  function position(piece, now) {
+    const from = motionOrigins.get(piece[0]);
+    if (!from || reducedMotion) return [piece[3], piece[4]];
+    const progress = Math.min(1, Math.max(0, (now - motionStart) / motionDuration));
+    return [from[0] + progress * (piece[3] - from[0]), from[1] + progress * (piece[4] - from[1])];
+  }
+
+  function spellClock(now) {
+    if (state.status !== "running") return state.ms;
+    const elapsed = (now - motionStart) * state.speed;
+    return state.ms - spellFrameMs + Math.min(spellFrameMs, Math.max(0, elapsed));
+  }
+
+  function draw(now) {
+    const {width, height} = state.arena;
+    if (!begin(state.arena)) return;
+    const aimedCard = pending?.card ?? (selected === null ? null : state.human.hand[selected].name);
+    const spellPreview = spellName(aimedCard);
+    if (selected !== null && state.status === "running") {
+      ctx.fillStyle = spellPreview ? "#a2f2de17" : "#a2f2de44";
+      for (const tile of legal[selected]) {
+        ctx.fillRect(tile % width + .04, height - 1 - Math.floor(tile / width) + .04, .92, .92);
+      }
+    }
+    const target = pending || (selected !== null && cursor);
+    if (target && spellPreview && (pending || isLegal(target))) {
+      paintSpellArea(spellPreview, target.x + .5, target.y + .5, height, 1, .95, true);
+    }
+    const visualMs = spellClock(now);
+    spellEffects = spellEffects.filter(cast => visualMs < castEnds(cast));
+    const activeCasts = spellEffects.filter(cast => castVisible(cast, visualMs));
+    for (const cast of activeCasts) drawCastArea(cast, visualMs, height);
+    drawPieces(state.pieces, height, piece => position(piece, now));
+    for (const [team, x, y, aimX, aimY, splash] of state.shots || []) {
+      const angle = Math.atan2(y - aimY, aimX - x);
+      stroke(x - Math.cos(angle) * .42, height - y - Math.sin(angle) * .42,
+        x, height - y, colors[team], splash ? .16 : .09);
+      ring(x, height - y, splash ? .16 : .10, "#fff1ca", true);
+    }
+    for (const [team, x, y, , card] of state.spells || []) {
+      if (spellName(card)) continue;
+      ctx.lineWidth = .13;
+      ring(x, height - y, .45, colors[team]);
+      ring(x, height - y, .16, "#fff1ca", true);
+    }
+    for (const cast of activeCasts) drawCast(cast, visualMs, height);
+    effects = effects.filter(effect => now - effect.started < 560);
+    for (const effect of effects) {
+      const ratio = (now - effect.started) / 560;
+      ctx.globalAlpha = 1 - ratio;
+      ctx.lineWidth = .13;
+      const radius = (effect.card_kind === "SPELL" ? .9 : .45) + ratio * (reducedMotion ? 0 : 1.15);
+      ring(effect.x, height - effect.y, radius, colors[effect.seat]);
+    }
+    ctx.globalAlpha = 1;
+    if (target) {
+      const color = pending ? "#f6d299" : isLegal(target) ? "#edffed" : "#ff9c83";
+      ctx.lineWidth = .13;
+      ring(target.x + .5, height - target.y - .5, .51, color);
+    }
+  }
+
+  function render(now) {
+    frame = requestAnimationFrame(render);
+    if (!state || now - lastDraw < 1000 / 35) return;
+    lastDraw = now;
+    draw(now);
+  }
 })();

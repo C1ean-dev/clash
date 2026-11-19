@@ -15,12 +15,12 @@ No PowerShell, abra a pasta do projeto e execute:
 Acesse a seção **Jogar contra a IA** diretamente no painel web (ou em `http://127.0.0.1:8766/#jogar`):
 - **Escolha seu deck**: Corredor 2.6, Gigante Real, X-Bow 3.0 ou IceBow.
 - **Escolha o oponente (IA)**: selecione qualquer checkpoint treinado (PPO ou Imitação BC de qualquer experimento salvo em `runs/`) ou bots de regras programados.
-- **Ajuste a velocidade**: de 0.5× (modo tático com mais tempo para reagir) a 1.0× (tempo real) ou 1.5×.
+- **Ajuste a velocidade** de 0,5× a 1,5×. A velocidade também pode ser ajustada durante a batalha.
 - **Controles de batalha**:
-  - Selecione uma carta na sua mão clicando nela ou usando as teclas `[1]`, `[2]`, `[3]`, `[4]`.
-  - O tabuleiro destaca a área válida para posicionamento. Mova o mouse sobre a arena e clique no tile desejado para posicionar a carta.
-  - A barra de elixir carrega em tempo real e exibe a próxima carta do seu ciclo.
-  - Pressione `Espaço` para pausar/retomar e `Esc` para cancelar a seleção de carta.
+  - Arraste uma carta para uma casa destacada ou selecione a carta e clique ou toque na arena.
+  - No teclado, use `1`–`4` para selecionar, as setas para mirar e `Enter` para posicionar.
+  - Abaixo da arena ficam a mão, a próxima carta e a barra de elixir.
+  - Pressione `Espaço` para pausar ou retomar e `Esc` para cancelar a seleção.
   - Efeitos sonoros sintetizados pelo navegador e feedback tático em tempo real.
 
 No [painel local](http://127.0.0.1:8766/), escolha X-Bow 3.0 ou IceBow. Em **Treinamento assistido**, escolha **Novo treino** ou selecione um experimento com checkpoints para **Retomar self-play**. Ajuste a duração e clique no botão de início. A tela acompanha a reconstrução dos replays, as épocas de imitação, as partidas de self-play e a avaliação, além de mostrar os registros e as métricas conforme são gravados.
@@ -28,6 +28,8 @@ No [painel local](http://127.0.0.1:8766/), escolha X-Bow 3.0 ou IceBow. Em **Tre
 O máximo do slider **Replays** acompanha a quantidade de candidatos do deck selecionado nas partições Parquet locais. O portal recalcula esse máximo quando as partições mudam. O simulador pode descartar replays durante a reconstrução.
 
 **Parar treino** solicita a parada no próximo ponto seguro. Os checkpoints já gravados ficam disponíveis. Fechar a página não encerra o treino, que pode ser acompanhado ao reabrir o painel.
+
+No self-play e na avaliação, o simulador mantém até quatro partidas em andamento e agrupa as previsões da IA no mesmo processo. O controle **Partidas por atualização** define o total de partidas antes de cada atualização PPO. Na linha de comando, use `--parallel-games` de 1 a 8 para ajustar quantas partidas avançam juntas.
 
 Em **Arena do treino**, veja o estado do tabuleiro, as mãos, o elixir e as jogadas registrados pelo simulador. **Imitação** compara a jogada humana com a decisão do modelo no mesmo quadro e mostra como a previsão muda ao longo dos lotes. **Self-play** e **Avaliação** mostram as partidas jogadas pelo modelo. Pause, avance pela gravação ou selecione um dos três registros mais recentes de cada etapa. Os exemplos com a indicação **Demonstração com dados locais** usam replays do dataset e checkpoints já salvos.
 

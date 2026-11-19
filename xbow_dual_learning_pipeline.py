@@ -31,6 +31,8 @@ def main():
     parser.add_argument("--resume-ppo", action="store_true", help="Continua a partir de output/ppo.pt")
     parser.add_argument("--ppo-updates", type=int, default=0)
     parser.add_argument("--rollout-games", type=int, default=4)
+    parser.add_argument("--parallel-games", type=int, choices=range(1, 9),
+                        help="Número de partidas simultâneas no self-play e na avaliação (padrão: 4)")
     parser.add_argument("--kl-coef", type=float, default=0.15)
     parser.add_argument("--evaluate", type=int, default=0, metavar="GAMES")
     parser.add_argument("--evaluate-checkpoint", type=Path, help="Compara um checkpoint PPO salvo com o BC")

@@ -9,6 +9,7 @@ from royaleimitate.replays import CARD_NAMES
 
 from xbow_environment import battle_env
 from xbow_capture_bridge import CaptureBridge
+from xbow_play_session import PlaySession, PLAY_STEP_MS
 from xbow_public_feed import PublicFeed
 from xbow_replays import DECKS
 from xbow_training import clone_loss, kata_weights
@@ -79,6 +80,32 @@ class ResamplingTests(unittest.TestCase):
         loss = clone_loss(distribution, torch.tensor([0, 1, 1, 1]),
                           torch.tensor([2, 2 / 3, 2 / 3, 2 / 3]))
         torch.testing.assert_close(loss, expected_timing + weighted_choice)
+
+
+class PlaySessionTests(unittest.TestCase):
+    def test_places_the_current_card_on_the_next_simulation_step(self):
+        session = PlaySession()
+        self.addCleanup(session.stop)
+        opening = session.snapshot()["opening_ms"]
+        self.assertGreater(opening, 0)
+        while session.snapshot()["opening_ms"]:
+            session._step()
+
+        before = session.snapshot()
+        card = next(card for card in before["human"]["hand"] if card["legal_tiles"])
+        slot = card["slot"]
+        x, y = card["legal_tiles"][0]
+        self.assertFalse(session.queue_human_action(slot, x, y, card["id"] + 1)["ok"])
+        queued = session.queue_human_action(slot, x, y, card["id"])
+        self.assertTrue(queued["ok"])
+        self.assertFalse(session.queue_human_action(slot, x, y, card["id"])["ok"])
+        session._step()
+
+        after = session.snapshot()
+        self.assertEqual(after["ms"] - before["ms"], PLAY_STEP_MS)
+        self.assertEqual(after["command"], {"id": queued["command_id"], "status": "played"})
+        self.assertNotEqual(after["human"]["hand"][slot]["id"], card["id"])
+        self.assertNotIn("hand", after["ai"])
 
 
 class PublicFeedTests(unittest.TestCase):

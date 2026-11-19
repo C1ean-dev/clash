@@ -69,6 +69,10 @@ function updateRuns() {
     button.setAttribute("aria-pressed", String(button.dataset.deck === deck));
   }
 }
+function simultaneousGames(info) {
+  return info.parallel_games > 1 ? ` · até ${info.parallel_games} simultâneas` : "";
+}
+
 function phase(run) {
   const info = run?.phase || {};
   const names = {
@@ -80,11 +84,11 @@ function phase(run) {
   };
   let details = "";
   if (info.event === "ppo_game") {
-    details = `Atualização ${info.update}/${info.total} · partida ${info.done}/${info.games}`;
+    details = `Atualização ${info.update}/${info.total} · partida ${info.done}/${info.games}${simultaneousGames(info)}`;
   } else if (info.event === "bc_batch") {
     details = `Época ${info.epoch}/${info.total} · lote ${info.done}/${info.batches}`;
   } else if (Number.isFinite(info.done) && Number.isFinite(info.total)) {
-    details = `${info.done}/${info.total} concluídos`;
+    details = `${info.done}/${info.total} concluídos${simultaneousGames(info)}`;
   }
   if (info.event === "failed") details = info.message;
   return names[info.event] ?
@@ -288,14 +292,14 @@ function stageProgress(job, info) {
     return ["bc", "Imitação", `${info.done || 0}/${info.total} épocas concluídas`, info.done || 0, info.total];
   }
   if (event === "ppo_game") {
-    return ["ppo", "Self-play", `Atualização ${info.update}/${info.total} · partida ${info.done}/${info.games}`,
+    return ["ppo", "Self-play", `Atualização ${info.update}/${info.total} · partida ${info.done}/${info.games}${simultaneousGames(info)}`,
       info.update - 1 + info.done / (info.games + 1), info.total];
   }
   if (event.startsWith("ppo")) {
-    return ["ppo", "Self-play", `${info.done}/${info.total} atualizações concluídas`, info.done, info.total];
+    return ["ppo", "Self-play", `${info.done}/${info.total} atualizações concluídas${simultaneousGames(info)}`, info.done, info.total];
   }
   if (event.startsWith("evaluation")) {
-    return ["evaluation", "Avaliação na arena", `${info.done}/${info.total} confrontos por modelo e rival`, info.done, info.total];
+    return ["evaluation", "Avaliação na arena", `${info.done}/${info.total} confrontos por modelo e rival${simultaneousGames(info)}`, info.done, info.total];
   }
   return [job.mode === "resume" ? "ppo" : "replays", "Preparando o treino", "Carregando o ambiente", null, null];
 }

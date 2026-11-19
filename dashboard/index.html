@@ -54,149 +54,114 @@
     <section class="panel play-panel" id="jogar" aria-labelledby="play-title">
       <div class="section-head">
         <div>
-          <h2 id="play-title">🎮 Batalha contra a IA</h2>
-          <p id="play-subtitle">Enfrente os modelos treinados (PPO, Imitação BC ou Bots Táticos) em tempo real!</p>
+          <h2 id="play-title">Batalha contra a IA</h2>
+          <p id="play-subtitle">Escolha seu deck e desafie um bot tático ou um modelo treinado.</p>
         </div>
-        <span class="job-badge" id="play-badge">Pronto para jogar</span>
+        <span class="job-badge" id="play-badge">Pronto</span>
       </div>
 
-      <!-- Configuração da Partida -->
       <div class="play-setup" id="play-setup">
-        <form id="play-form" class="play-form">
+        <form id="play-form">
           <div class="play-form-grid">
             <label class="play-field">
-              <span>Seu Deck (Jogador)</span>
+              Seu deck
               <select id="play-human-deck">
-                <option value="hog_26" selected>Corredor 2.6 (Ciclo Rápido)</option>
-                <option value="royal_giant">Gigante Real (Controle Pesado)</option>
-                <option value="xbow_30">X-Bow 3.0 (Ciclo de Cerco)</option>
-                <option value="icebow">IceBow (Defesa de Gelo e Foguete)</option>
+                <option value="hog_26">Corredor 2.6</option>
+                <option value="royal_giant">Gigante Real</option>
+                <option value="xbow_30">X-Bow 3.0</option>
+                <option value="icebow">IceBow</option>
               </select>
             </label>
-
             <label class="play-field">
-              <span>Oponente (IA / Checkpoint)</span>
+              Oponente
               <select id="play-ai-model">
-                <option value="scripted:xbow">Carregando modelos disponíveis...</option>
+                <option value="scripted:xbow">Bot tático · X-Bow</option>
               </select>
             </label>
-
             <label class="play-field">
-              <span>Velocidade da Partida</span>
+              Velocidade
               <select id="play-speed">
-                <option value="1.0" selected>1.0× (Normal · Decisão a cada 0.5s)</option>
-                <option value="0.75">0.75× (Moderada · Ritmo suave)</option>
-                <option value="0.5">0.5× (Tática · Mais tempo para pensar)</option>
-                <option value="1.5">1.5× (Acelerada)</option>
+                <option value="1" selected>1× · Tempo real</option>
+                <option value="0.75">0,75×</option>
+                <option value="0.5">0,5×</option>
+                <option value="1.5">1,5×</option>
               </select>
             </label>
           </div>
-
-          <div class="form-actions" style="margin-top:14px">
-            <button class="primary play-start-btn" id="play-start-btn" type="submit">⚔️ Iniciar Batalha</button>
-            <p class="muted">Você joga na parte inferior (Azul) e a IA na parte superior (Vermelho). Selecione a carta e clique no campo da arena para posicioná-la!</p>
+          <div class="play-form-actions">
+            <button class="primary play-start-btn" id="play-start-btn" type="submit">Iniciar batalha</button>
+            <p class="play-setup-message" id="play-setup-message" role="status"></p>
           </div>
         </form>
       </div>
 
-      <!-- Área Ativa da Batalha -->
       <div class="play-arena-area" id="play-arena-area" hidden>
-        <!-- Placar do Topo -->
-        <div class="battle-scoreboard">
-          <div class="battle-score-side ai-side">
-            <span class="battle-crowns" id="play-ai-crowns">👑 0</span>
-            <div class="battle-side-info">
-              <strong id="play-ai-name">IA X-Bow</strong>
-              <small id="play-ai-towers">Torres: —</small>
-            </div>
-          </div>
-
-          <div class="battle-clock-box">
-            <span class="battle-clock" id="play-clock">3:00</span>
-            <small class="battle-clock-label" id="play-clock-phase">Tempo Normal</small>
-          </div>
-
-          <div class="battle-score-side human-side">
-            <div class="battle-side-info text-right">
-              <strong id="play-human-name">Você (Jogador)</strong>
-              <small id="play-human-towers">Torres: —</small>
-            </div>
-            <span class="battle-crowns" id="play-human-crowns">0 👑</span>
-          </div>
-        </div>
-
-        <!-- Layout Central: Tabuleiro + Lateral -->
         <div class="battle-layout">
-          <div class="battle-board-wrap">
+          <div class="battle-stage" id="play-stage">
+            <div class="battle-scoreboard">
+              <div class="battle-side ai-side">
+                <strong>IA</strong><b id="play-ai-crowns" aria-label="Coroas da IA">0</b>
+              </div>
+              <div class="battle-clock-box">
+                <strong class="battle-clock" id="play-clock">3:00</strong>
+                <span id="play-clock-phase"></span>
+              </div>
+              <div class="battle-side human-side">
+                <b id="play-human-crowns" aria-label="Suas coroas">0</b><strong>Você</strong>
+              </div>
+            </div>
+
             <div class="battle-canvas-container">
-              <canvas id="play-board" role="img" aria-label="Campo de Batalha interativo"></canvas>
-              <div id="play-opening-overlay" class="battle-overlay opening" hidden>
-                <span>Preparando cartas (abertura)...</span>
+              <canvas id="play-board" tabindex="0" aria-label="Arena. Use as setas para escolher a casa e Enter para posicionar."></canvas>
+              <div id="play-opening-overlay" class="battle-overlay" hidden></div>
+              <div id="play-end-modal" class="battle-end-modal" role="dialog" aria-labelledby="play-result-title" hidden>
+                <div class="battle-end-card">
+                  <h3 id="play-result-title"></h3>
+                  <p id="play-result-detail"></p>
+                  <div class="battle-end-actions">
+                    <button type="button" class="primary" id="play-rematch-btn">Jogar de novo</button>
+                    <button type="button" class="secondary" id="play-new-match-btn">Trocar deck ou IA</button>
+                  </div>
+                </div>
               </div>
             </div>
 
-            <!-- Controles Rápidos -->
+            <div class="battle-deck">
+              <div class="battle-hand-row">
+                <div class="next-card-box">
+                  <span>Próxima</span>
+                  <div id="play-next-card" class="next-card-token"></div>
+                </div>
+                <div class="card-hand" id="play-hand" aria-label="Sua mão"></div>
+              </div>
+              <div class="elixir-box">
+                <strong id="play-elixir-val">0 / 10</strong>
+                <div class="elixir-bar" aria-hidden="true"><div class="elixir-fill" id="play-elixir-fill"></div></div>
+              </div>
+            </div>
+            <p class="battle-feedback" id="play-feedback" role="status"></p>
+          </div>
+
+          <aside class="battle-sidebar" aria-label="Controles e registro da batalha">
+            <div class="battle-sidebar-info">
+              <div><small>Oponente</small><strong id="play-ai-name"></strong></div>
+              <div><small>Seu deck</small><strong id="play-human-name"></strong></div>
+            </div>
             <div class="battle-quick-controls">
-              <button type="button" class="secondary" id="play-pause-btn" title="Atalho: Barra de Espaço">⏸️ Pausar</button>
-              <select id="play-live-speed" aria-label="Velocidade em tempo real">
-                <option value="0.5">0.5×</option>
-                <option value="0.75">0.75×</option>
-                <option value="1.0" selected>1.0×</option>
-                <option value="1.5">1.5×</option>
+              <button type="button" class="secondary" id="play-pause-btn" title="Atalho: Espaço">Pausar</button>
+              <select id="play-live-speed" aria-label="Velocidade durante a batalha">
+                <option value="0.5">0,5×</option><option value="0.75">0,75×</option>
+                <option value="1" selected>1×</option><option value="1.5">1,5×</option>
               </select>
-              <button type="button" class="secondary" id="play-sound-btn" title="Alternar som">🔊 Som</button>
-              <button type="button" class="secondary stop" id="play-surrender-btn">🏳️ Sair da partida</button>
+              <button type="button" class="secondary" id="play-sound-btn" aria-pressed="true">Som</button>
+              <button type="button" class="secondary" id="play-fullscreen-btn" hidden>Tela cheia</button>
+              <button type="button" class="secondary stop" id="play-surrender-btn">Sair da partida</button>
             </div>
-          </div>
-
-          <!-- HUD do Jogador (Lateral) -->
-          <div class="battle-hud">
-            <!-- Barra de Elixir -->
-            <div class="elixir-box">
-              <div class="elixir-head">
-                <span>Elixir</span>
-                <strong id="play-elixir-val">6.0 / 10 💧</strong>
-              </div>
-              <div class="elixir-bar">
-                <div class="elixir-fill" id="play-elixir-fill" style="width: 60%"></div>
-              </div>
-            </div>
-
-            <!-- Mão de 4 Cartas -->
-            <div class="hand-box">
-              <h3>Sua Mão <small>(Clique na carta e depois no campo, ou use [1] [2] [3] [4])</small></h3>
-              <div class="card-hand" id="play-hand">
-                <!-- Preenchido dinamicamente por play.js -->
-              </div>
-            </div>
-
-            <!-- Próxima Carta -->
-            <div class="next-card-box">
-              <span>Próxima Carta:</span>
-              <div class="next-card-pill" id="play-next-card">—</div>
-            </div>
-
-            <!-- Feed de Ações -->
             <div class="battle-feed-box">
-              <h3>Registro de Jogadas</h3>
-              <ol class="battle-moves-list" id="play-moves-list">
-                <li>Aguardando início da batalha...</li>
-              </ol>
+              <h3>Últimas jogadas</h3>
+              <ol class="battle-moves-list" id="play-moves-list"></ol>
             </div>
-          </div>
-        </div>
-
-        <!-- Banner de Fim de Partida -->
-        <div class="battle-end-modal" id="play-end-modal" hidden>
-          <div class="battle-end-card">
-            <h2 id="play-result-title">VITÓRIA!</h2>
-            <p id="play-result-detail">Parabéns! Você venceu a inteligência artificial.</p>
-            <div class="battle-end-stats" id="play-result-stats"></div>
-            <div class="battle-end-actions">
-              <button type="button" class="primary" id="play-rematch-btn">🔄 Jogar Novamente</button>
-              <button type="button" class="secondary" id="play-new-match-btn">⚙️ Trocar Deck / IA</button>
-            </div>
-          </div>
+          </aside>
         </div>
       </div>
     </section>
@@ -285,9 +250,10 @@
             </div>
             <div class="arena-controls">
               <button type="button" class="secondary" id="arena-play">Reproduzir</button>
+              <button type="button" class="secondary" id="arena-preview" hidden>Rever jogada</button>
               <input id="arena-seek" type="range" min="0" max="0" value="0" aria-label="Posição na gravação">
               <select id="arena-speed" aria-label="Velocidade da reprodução">
-                <option value="1">1×</option><option value="4">4×</option><option value="8" selected>8×</option><option value="16">16×</option>
+                <option value="1" selected>1×</option><option value="4">4×</option><option value="8">8×</option><option value="16">16×</option>
               </select>
             </div>
           </div>

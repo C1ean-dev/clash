@@ -251,36 +251,35 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 speed = float(payload.get("speed", 1.0))
                 session = ACTIVE_SESSIONS.start_session(human_deck, ai_deck, model_id, speed)
                 self.reply_json({"ok": True, "session_id": session.session_id, "state": session.snapshot()}, 200)
-            elif route == "/api/play/act":
-                session = ACTIVE_SESSIONS.get_session()
-                if not session:
-                    self.reply_json({"ok": False, "error": "Nenhuma partida em andamento."}, 400)
-                    return
-                slot = int(payload.get("slot", 0))
-                x = int(payload.get("x", 0))
-                y = int(payload.get("y", 0))
-                res = session.queue_human_action(slot, x, y)
-                self.reply_json(res, 200 if res.get("ok") else 400)
+                return
+
+            session_id = payload.get("session_id")
+            session = ACTIVE_SESSIONS.get_session()
+            if session is None or (session_id is not None and session.session_id != session_id):
+                self.reply_json({"ok": False, "error": "Esta partida já terminou ou foi substituída."}, 409)
+                return
+            if route == "/api/play/act":
+                slot, x, y = (payload.get(key) for key in ("slot", "x", "y"))
+                if not all(type(value) is int for value in (slot, x, y)):
+                    raise ValueError("Selecione uma carta e uma casa válidas.")
+                result = session.queue_human_action(slot, x, y, payload.get("card_id"))
+                self.reply_json(result, 200 if result["ok"] else 400)
             elif route == "/api/play/pause":
-                session = ACTIVE_SESSIONS.get_session()
-                if not session:
-                    self.reply_json({"ok": False, "error": "Nenhuma partida em andamento."}, 400)
-                    return
-                paused = session.toggle_pause()
-                self.reply_json({"ok": True, "paused": paused}, 200)
+                paused = payload.get("paused")
+                if paused is not None and type(paused) is not bool:
+                    raise ValueError("Estado de pausa inválido.")
+                self.reply_json({"ok": True, "paused": session.toggle_pause(paused)}, 200)
             elif route == "/api/play/speed":
-                session = ACTIVE_SESSIONS.get_session()
-                if not session:
-                    self.reply_json({"ok": False, "error": "Nenhuma partida em andamento."}, 400)
-                    return
-                speed = float(payload.get("speed", 1.0))
-                new_speed = session.set_speed(speed)
-                self.reply_json({"ok": True, "speed": new_speed}, 200)
-            elif route == "/api/play/stop":
-                ACTIVE_SESSIONS.stop_session()
-                self.reply_json({"ok": True}, 200)
+                speed = session.set_speed(float(payload.get("speed", 1.0)))
+                self.reply_json({"ok": True, "speed": speed}, 200)
+            else:
+                stopped = ACTIVE_SESSIONS.stop_session(session.session_id)
+                self.reply_json({"ok": stopped}, 200 if stopped else 409)
+        except (TypeError, ValueError) as exc:
+            self.reply_json({"ok": False, "error": str(exc)}, 400)
         except Exception as exc:
-            self.reply_json({"ok": False, "error": str(exc)}, 500)
+            print(f"Falha no painel de batalha: {exc}", flush=True)
+            self.reply_json({"ok": False, "error": "O modo batalha encontrou um erro."}, 500)
 
     def reply_json(self, value, status):
         self.respond(json.dumps(value, ensure_ascii=False).encode("utf-8"), "application/json", status)
@@ -299,10 +298,13 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
 
 def main():
+    import torch
+
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--port", type=int, default=8766)
     parser.add_argument("--open", action="store_true", help="Abre o painel no navegador")
     args = parser.parse_args()
+    torch.set_num_threads(1)
     with ThreadingHTTPServer(("127.0.0.1", args.port), DashboardHandler) as server:
         url = f"http://127.0.0.1:{server.server_port}/"
         print(f"Painel X-Bow Control em {url}", flush=True)

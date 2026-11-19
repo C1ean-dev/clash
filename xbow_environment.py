@@ -113,7 +113,7 @@ class PublicBattleEnv(ClashParallelEnv):
         return results
 
 
-def battle_env(deck, rival_deck=None):
+def battle_env(deck, rival_deck=None, *, decision_ms=500):
     available = DECKS | RIVAL_DECKS
     engine = RustEngine()
     card_ids = {card.name: card.card_id for card in engine.cards()}
@@ -122,7 +122,7 @@ def battle_env(deck, rival_deck=None):
     return PublicBattleEnv(
         engine,
         state_mutator=DefaultStateMutator(decks=decks),
-        decision_ms=500,
+        decision_ms=decision_ms,
         action_parser=TileActionParser(ability_buttons=True),
         obs_builder=PublicSpatialBuilder(
             reveal=Reveal(), enemy_queue=True, evolutions=True,
