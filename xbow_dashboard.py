@@ -6,6 +6,7 @@ import errno
 from functools import lru_cache
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import socket
 from threading import Timer
@@ -16,16 +17,18 @@ from royalegym import RustEngine
 
 from xbow_dashboard_jobs import ACTIVE, BusyError, DashboardJobs, DECKS
 from xbow_arena import STAGES, live_data
-from xbow_environment import RIVAL_DECKS
+from xbow_environment import RIVAL_DECKS, obs_profile_for_architecture
 from xbow_metrics import read_run_journal
 from xbow_replays import CARD_NAMES, DECKS as X_BOW_DECKS
 from xbow_video_catalog import VideoCatalog
+from xbow_live_controller import LiveGameController
 from xbow_play_session import ACTIVE_SESSIONS, DECK_LABELS, card_pt_name, list_available_models
 
 
 ROOT = Path(__file__).resolve().parent
 RUNS = ROOT / "runs"
 JOBS = DashboardJobs(ROOT)
+LIVE_CTRL = LiveGameController(ROOT)
 VIDEOS = VideoCatalog(RUNS / ".replay-sources" / "alphaclash-manifest.jsonl")
 ASSETS = {
     "/": ("index.html", "text/html"),
@@ -84,6 +87,113 @@ def modified(path):
         return 0
 
 
+@lru_cache(maxsize=64)
+def _cached_checkpoint_meta(path_str, mtime_ns, size):
+    import torch
+
+    try:
+        saved = torch.load(path_str, map_location="meta", weights_only=True)
+    except Exception:
+        return {}
+    arch = int(saved.get("architecture", 1))
+    arch_cfg = saved.get("arch_config") or {}
+    obs_profile = obs_profile_for_architecture(arch, arch_cfg.get("obs_profile"))
+    metrics = saved.get("metrics") or {}
+    trainer = saved.get("trainer") or {}
+    pfsp_wr = trainer.get("pfsp_wr")
+    if isinstance(pfsp_wr, dict):
+        pfsp_wr = {str(k): round(float(v), 4) for k, v in pfsp_wr.items()}
+    else:
+        pfsp_wr = None
+    spec = list(saved.get("spec") or ())
+    return {
+        "architecture": arch,
+        "obs_profile": obs_profile,
+        "channels": int(spec[0]) if spec else None,
+        "cnn_width": arch_cfg.get("channels"),
+        "spec": spec,
+        "mirror_augmentation": metrics.get("mirror_augmentation"),
+        "competitive_only": metrics.get("competitive_only"),
+        "reward_profile": metrics.get("reward_profile") or trainer.get("reward_profile"),
+        "pfsp_wr": pfsp_wr,
+        "live_finetune": metrics.get("live_finetune"),
+    }
+
+
+def read_run_model_info(path):
+    info = {}
+    for stage in ("bc", "ppo"):
+        ckpt = path / f"{stage}.pt"
+        try:
+            st = ckpt.stat()
+        except OSError:
+            continue
+        meta = _cached_checkpoint_meta(str(ckpt), st.st_mtime_ns, st.st_size)
+        for key, val in meta.items():
+            if val is not None:
+                info[key] = val
+    return info
+
+
+@lru_cache(maxsize=128)
+def _cached_live_match(path_str, mtime_ns, size):
+    try:
+        lines = Path(path_str).read_text(encoding="utf-8").splitlines()
+    except (OSError, UnicodeError):
+        return None
+    if not lines:
+        return None
+    header, footer = {}, {}
+    for line in lines:
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if obj.get("kind") == "header" and not header:
+            header = obj
+        elif obj.get("kind") == "footer":
+            footer = obj
+    result = footer.get("result", "unknown")
+    frames = int(footer.get("frames") or max(0, len(lines) - 2))
+    return {
+        "file": Path(path_str).name,
+        "deck": header.get("deck", "xbow_30"),
+        "result": result,
+        "frames": frames,
+        "started": header.get("started", ""),
+        "ended": footer.get("ended", ""),
+    }
+
+
+def live_matches_summary(runs_dir):
+    folder = runs_dir / "live_matches"
+    summary = {"count": 0, "wins": 0, "losses": 0, "draws": 0, "total_frames": 0, "matches": []}
+    if not folder.is_dir():
+        return summary
+    entries = []
+    for path in sorted(folder.glob("*.jsonl"), reverse=True):
+        try:
+            st = path.stat()
+        except OSError:
+            continue
+        row = _cached_live_match(str(path), st.st_mtime_ns, st.st_size)
+        if not row:
+            continue
+        summary["count"] += 1
+        summary["total_frames"] += row["frames"]
+        if row["result"] == "win":
+            summary["wins"] += 1
+        elif row["result"] == "loss":
+            summary["losses"] += 1
+        elif row["result"] == "draw":
+            summary["draws"] += 1
+        entries.append(row)
+    summary["matches"] = entries[:20]
+    return summary
+
+
 def experiment(path):
     report = json_file(path / "selfplay.json")
     events = list(read_run_journal(path))
@@ -132,7 +242,48 @@ def experiment(path):
         "updates": [updates[number] for number in sorted(updates)],
         "evaluation": evaluation, "validation": current_validation,
         "phase": phase, "progress": progress, "epochs": epochs, "split": split,
-        "checkpoints": checkpoints,
+        "checkpoints": checkpoints, "model_info": read_run_model_info(path),
+    }
+
+
+def recommended_summary():
+    """Lightweight real-time snapshot for the Recommended Training card in /treinamento."""
+    v_models = ROOT / "models" / "vision"
+    v_ds = ROOT / "runs" / "vision_dataset"
+    custom_pt = v_models / "custom_yolo.pt"
+    pub_onnx = v_models / "units_M_480x352.onnx"
+    active_vision = (
+        "custom_yolo.pt" if custom_pt.is_file()
+        else ("units_M_480x352.onnx" if pub_onnx.is_file() else "hp_bar_only")
+    )
+    stats = {}
+    stats_file = v_ds / "stats.json"
+    if stats_file.is_file():
+        try:
+            stats = json.loads(stats_file.read_text(encoding="utf-8"))
+        except Exception:
+            stats = {}
+    live_frames = int(stats.get("frames_saved") or 0)
+    if live_frames == 0 and (v_ds / "live" / "images").is_dir():
+        live_frames = len(list((v_ds / "live" / "images").glob("*.jpg")))
+    sprites = int(stats.get("sprites_harvested") or 0)
+    verified = int(stats.get("verified_play_labels") or 0)
+    disc_count = 0
+    disc_file = RUNS / "discovered_decks.json"
+    if disc_file.is_file():
+        try:
+            disc_count = len((json.loads(disc_file.read_text(encoding="utf-8")).get("decks")) or {})
+        except Exception:
+            disc_count = 0
+    return {
+        "active_vision": active_vision,
+        "custom_yolo_ready": custom_pt.is_file(),
+        "public_yolo_ready": pub_onnx.is_file(),
+        "vision_live_frames": live_frames,
+        "vision_sprites": sprites,
+        "vision_verified_labels": verified,
+        "discovered_decks": disc_count,
+        "simulator_cards": 119,
     }
 
 
@@ -148,11 +299,21 @@ def dashboard_data():
                 runs.append(result)
     runs.sort(key=lambda row: (row["group"] != "calibrated", row["id"]))
     inventory = JOBS.inventory.snapshot()
+    total_cpus = os.cpu_count() or 4
+    max_threads = max(1, total_cpus - 1)
+    max_workers = max(1, min(12, total_cpus // 2))
     return {
         "runs": runs, "job": JOBS.current(),
         "joint_training": "shared_match",
         "continuous_training": True,
         "continuous_parallel": True,
+        "system": {
+            "cpu_threads": total_cpus,
+            "max_threads": max_threads,
+            "max_workers": max_workers,
+        },
+        "live_matches": live_matches_summary(RUNS),
+        "recommended": recommended_summary(),
         "parts": inventory["parts"], "inventory": inventory,
         "refreshed": datetime.now(timezone.utc).isoformat(),
     }
@@ -162,7 +323,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         url = urlsplit(self.path)
         path = url.path
-        if path == "/api/status":
+        if path in ("/treinamento", "/treino"):
+            self.send_response(302)
+            self.send_header("Location", "/#treino")
+            self.end_headers()
+        elif path == "/api/status":
             payload = json.dumps(dashboard_data(), ensure_ascii=False).encode("utf-8")
             self.respond(payload, "application/json")
         elif path in ASSETS:
@@ -180,6 +345,16 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 self.reply_json({"active": False}, 200)
             else:
                 self.reply_json({"active": True, "state": session.snapshot()}, 200)
+        elif path == "/api/live/status":
+            deck = parse_qs(url.query).get("deck", ["xbow_30"])[0]
+            self.reply_json(LIVE_CTRL.status(deck), 200)
+        elif path == "/api/live/preview":
+            kind = parse_qs(url.query).get("kind", ["deck"])[0]
+            data_bytes = LIVE_CTRL.preview_bytes(kind)
+            if data_bytes is None:
+                self.send_error(404)
+            else:
+                self.respond_raw(data_bytes, "image/png", 200)
         elif path == "/api/videos":
             query = parse_qs(url.query)
             try:
@@ -224,7 +399,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         valid_routes = (
             "/api/job/start", "/api/job/stop",
             "/api/play/start", "/api/play/act", "/api/play/pause",
-            "/api/play/speed", "/api/play/stop"
+            "/api/play/speed", "/api/play/stop",
+            "/api/live/action",
         )
         if route not in valid_routes:
             self.reply_json({"error": "Ação desconhecida."}, 404)
@@ -243,6 +419,11 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
             if route.startswith("/api/play/"):
                 self.handle_play_post(route, payload)
+                return
+
+            if route == "/api/live/action":
+                result = LIVE_CTRL.action(str(payload.get("action") or ""), payload)
+                self.reply_json(result, 200)
                 return
 
             job = JOBS.start(payload) if route.endswith("/start") else JOBS.stop(payload.get("id"))
@@ -296,6 +477,18 @@ class DashboardHandler(BaseHTTPRequestHandler):
 
     def reply_json(self, value, status):
         self.respond(json.dumps(value, ensure_ascii=False).encode("utf-8"), "application/json", status)
+
+    def respond_raw(self, data, media, status=200):
+        self.send_response(status)
+        self.send_header("Content-Type", media)
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        try:
+            self.end_headers()
+            self.wfile.write(data)
+        except (ConnectionAbortedError, ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
 
     def respond(self, data, media, status=200):
         self.send_response(status)

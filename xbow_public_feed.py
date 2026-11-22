@@ -71,18 +71,68 @@ class Frame(msgspec.Struct, forbid_unknown_fields=True):
     reset: bool = False
 
 
+class UnitIdTracker:
+    """Assign persistent UIDs across screen-reader frames by nearest-neighbor matching."""
+
+    def __init__(self, max_distance_tiles: float = 4.5):
+        self.max_dist_sq = float(max_distance_tiles) ** 2
+        self.next_uid = 1
+        self.prev: list[tuple[int, str, int, str, float, float]] = []
+
+    def reset(self, first_uid: int):
+        self.next_uid = int(first_uid)
+        self.prev = []
+
+    def assign(self, items: list[tuple[str, int, str, float, float]]) -> list[int]:
+        """Match (side, card_id, kind, x, y) to previous frame tracks and return persistent UIDs."""
+        if not items:
+            self.prev = []
+            return []
+        candidates = []
+        for cur_idx, (side, card_id, kind, x, y) in enumerate(items):
+            for prev_idx, (uid, p_side, p_card, p_kind, px, py) in enumerate(self.prev):
+                if side != p_side or card_id != p_card or kind != p_kind:
+                    continue
+                dist_sq = (x - px) ** 2 + (y - py) ** 2
+                if dist_sq <= self.max_dist_sq:
+                    candidates.append((dist_sq, cur_idx, prev_idx, uid))
+        candidates.sort(key=lambda row: row[0])
+        matched_cur: dict[int, int] = {}
+        used_prev: set[int] = set()
+        for _, cur_idx, prev_idx, uid in candidates:
+            if cur_idx in matched_cur or prev_idx in used_prev:
+                continue
+            matched_cur[cur_idx] = uid
+            used_prev.add(prev_idx)
+        uids = []
+        next_prev = []
+        for cur_idx, (side, card_id, kind, x, y) in enumerate(items):
+            uid = matched_cur.get(cur_idx)
+            if uid is None:
+                uid = self.next_uid
+                self.next_uid += 1
+            uids.append(uid)
+            next_prev.append((uid, side, card_id, kind, x, y))
+        self.prev = next_prev
+        return uids
+
+
 class PublicFeed:
     """One observer since the opening of a normal 1v1 battle."""
 
-    def __init__(self, deck):
-        self.env = battle_env(deck)
+    def __init__(self, deck, *, obs_profile="v2"):
+        self.obs_profile = obs_profile
+        self.env = battle_env(deck, obs_profile=obs_profile)
         self.env.reset()
         self.opening = self.env.battle_state
         self.tick = None
         self.scale = self.env.engine.arena().subtile
         self.ids = {card.name: card.card_id for card in self.env.engine.cards()}
+        self.name_by_id = {card.card_id: card.name for card in self.env.engine.cards()}
+        self.unit_type_by_name = {name: idx for idx, name in enumerate(self.env.engine.unit_types())}
         self.keys = {key: self.ids[name] for key, name in CARD_NAMES.items() if name in self.ids}
         self.own_ids = frozenset(self.opening.players[0].deck)
+        self.tracker = UnitIdTracker()
 
     def card(self, key):
         if key is None:
@@ -172,24 +222,38 @@ class PublicFeed:
                     for tower in self.opening.entities
                     if views[tower.team].hp[tower.tower_slot] > 0]
         first_uid = 1 + max(tower.uid for tower in self.opening.entities)
-        for uid, unit in enumerate(frame.units, start=first_uid):
+        if starting:
+            self.tracker.reset(first_uid)
+        track_inputs = [
+            (unit.side, self.card(unit.card), unit.kind, unit.position[0], unit.position[1])
+            for unit in frame.units
+        ]
+        unit_uids = self.tracker.assign(track_inputs)
+        for uid, unit in zip(unit_uids, frame.units, strict=True):
             if unit.hp > unit.max_hp:
                 raise ValueError("A vida observada de uma unidade excede sua vida máxima.")
             x, y = self.position(unit.position)
             flags = {"basic": 0, "evolved": STATUS_EVOLVED, "hero": STATUS_HERO}
+            radius_px = round(unit.radius * self.scale)
             footprint = None
             if unit.footprint is not None:
                 left, right = unit.footprint
                 if left[0] > right[0] or left[1] > right[1]:
                     raise ValueError("Os cantos da área ocupada pela construção estão invertidos.")
                 footprint = (*self.position(left), *self.position(right))
+            elif unit.kind == "building":
+                # Screen readers omit explicit placement boxes; approximate from center + radius.
+                footprint = (x - radius_px, y - radius_px, x + radius_px, y + radius_px)
+            card_name = CARD_NAMES.get(base_key(unit.card)) if unit.card is not None else None
+            unit_type = self.unit_type_by_name.get(card_name, 0) if card_name else 0
             entities.append(EntityState(
                 uid=uid, team=int(unit.side == "opponent"), card_id=self.card(unit.card),
                 kind=EntityKind.BUILDING if unit.kind == "building" else EntityKind.TROOP,
                 tower_slot=-1, x=x, y=y, hp=unit.hp, max_hp=unit.max_hp,
-                radius=round(unit.radius * self.scale), flying=unit.kind == "air",
+                radius=radius_px, flying=unit.kind == "air",
                 deploy_ticks=int(unit.deploying), stun_ticks=int(unit.stunned),
                 status_flags=flags[unit.form], footprint=footprint,
+                charge=0, unit_type=unit_type,
             ))
         spells = []
         for spell in frame.spells:
@@ -224,6 +288,18 @@ class PublicFeed:
         policy_input = builder.build(state, 0, mask)
         self.tick = frame.tick
         return policy_input
+
+    def public_summary(self):
+        memory = self.env.obs_builder.memory[0]
+        seen = [self.name_by_id[int(cid)] for cid in np.flatnonzero(memory.foe_seen) if int(cid) in self.name_by_id]
+        queue = [self.name_by_id.get(int(cid), "?") for cid in memory.enemy_queue() if int(cid) != EMPTY_CARD]
+        return {
+            "tick": int(self.tick or 0),
+            "own_elixir": round(memory.own_elixir_milli() / 1000.0, 2),
+            "enemy_elixir": round(memory.enemy_elixir_milli() / 1000.0, 2),
+            "enemy_queue": queue,
+            "enemy_seen": seen,
+        }
 
     def close(self):
         self.env.close()

@@ -3,5 +3,10 @@
 __pycache__/
 replays/
 runs/
+models/
 il_replay_sample.json
 .codex/
+calibration/preview.png
+calibration/preview_match_annotated.png
+calibration/deck_check.png
+onnxruntime_profile_*.json

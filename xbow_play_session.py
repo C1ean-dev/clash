@@ -76,12 +76,25 @@ CARD_PT_NAMES = {
     "BabyDragon": "Bebê Dragão",
     "Tombstone": "Lápide",
     "BarbLog": "Barril de Bárbaro",
+    "GoblinBarrel": "Barril de Goblins",
+    "GoblinGang": "Gangue de Goblins",
+    "InfernoTower": "Torre Inferno",
+    "NightWitch": "Bruxa Sombria",
+    "Lumberjack": "Lenhador",
+    "MegaMinion": "Megasservo",
+    "BattleRam": "Aríete de Batalha",
+    "Bandit": "Bandida",
+    "ElectroWizard": "Mago Elétrico",
+    "MagicArcher": "Arqueiro Mágico",
 }
 
 DECK_LABELS = {
     "hog_26": "Corredor 2.6 (Ciclo Rápido)",
     "royal_giant": "Gigante Real (Controle Pesado)",
     "splashyard": "Splashyard",
+    "log_bait": "Log Bait Clássico",
+    "golem_beatdown": "Golem Beatdown",
+    "pekka_bs": "P.E.K.K.A Bridge Spam",
     "xbow_30": "X-Bow 3.0 (Ciclo de Cerco)",
     "icebow": "IceBow (Defesa de Gelo e Foguete)",
 }
@@ -181,8 +194,10 @@ class PlaySession:
         if not isinstance(human_deck, str) or human_deck not in DECK_LABELS:
             raise ValueError("Escolha um deck válido.")
         self.ai_deck, self.policy, self.model_label = self._load_model(ai_deck, model_id)
-
-        self.env = battle_env(self.human_deck, self.ai_deck, decision_ms=PLAY_STEP_MS)
+        obs_profile = self.policy.obs_profile if self.policy is not None else "v3"
+        self.env = battle_env(
+            self.human_deck, self.ai_deck, decision_ms=PLAY_STEP_MS, obs_profile=obs_profile,
+        )
         self.parser = self.env.action_parser
         self.pitch = self.parser.pitch
         seed = random.randrange(1, 1 << 31)
@@ -292,7 +307,7 @@ class PlaySession:
         if not observation["action_mask"][1:].any():
             return 0
         if self.policy is not None:
-            action, _, _ = self.policy.decide(observation, "cpu")
+            action, _, _ = self.policy.decide(observation, "cpu", temperature=0.45)
             return action
         bot = self.model_id.removeprefix("scripted:")
         return scripted_move(self.env, 1, observation, self.rng, bot)

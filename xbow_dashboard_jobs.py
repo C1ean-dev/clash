@@ -234,14 +234,112 @@ class DashboardJobs:
                 raise BusyError("Já existe um treinamento em andamento.")
             return self.launch(request)
 
+    def _launch_recommended(self, request, deck):
+        total_cpus = os.cpu_count() or 4
+        max_threads = max(1, total_cpus - 1)
+        run_id = request.get("run_id")
+        output = None
+        if isinstance(run_id, str) and run_id.strip():
+            cand = (self.runs / run_id).resolve()
+            if (cand.is_relative_to(self.runs) and cand.name == deck
+                    and any((cand / f"{s}.pt").is_file() for s in ("ppo_live", "ppo", "bc"))):
+                output = cand
+        if output is None:
+            # Pick best available run for this deck (prefer one with ppo_live.pt or highest ppo update).
+            best = None
+            for folder, names, _ in self.runs.walk():
+                names[:] = [n for n in names if not n.startswith((".", "frames-"))]
+                if folder.name != deck:
+                    continue
+                names.clear()
+                if not any((folder / f"{s}.pt").is_file() for s in ("ppo_live", "ppo", "bc")):
+                    continue
+                has_live = (folder / "ppo_live.pt").is_file()
+                has_ppo = (folder / "ppo.pt").is_file()
+                mtime = max(
+                    (folder / f"{s}.pt").stat().st_mtime
+                    for s in ("ppo_live", "ppo", "bc")
+                    if (folder / f"{s}.pt").is_file()
+                )
+                score = (2 if has_live else 1 if has_ppo else 0, mtime)
+                if best is None or score > best[0]:
+                    best = (score, folder)
+            if best is None:
+                raise ValueError("Nenhum experimento treinado encontrado para este deck. Rode um 'Novo treino' primeiro.")
+            output = best[1].resolve()
+
+        train_vision = bool(request.get("train_vision", True))
+        ppo_updates = max(1, min(500, int(request.get("updates", 4))))
+        rollout_games = max(2, min(256, int(request.get("games", 32))))
+        eval_games = max(1, min(16, int(request.get("evaluate", 2))))
+        threads = max(1, min(max_threads, int(request.get("threads", min(14, max_threads)))))
+        vision_epochs = max(1, min(30, int(request.get("vision_epochs", 10))))
+        vision_syn = max(40, min(1000, int(request.get("vision_synthetic_count", 300))))
+
+        params = {
+            "train_vision": train_vision,
+            "updates": ppo_updates,
+            "games": rollout_games,
+            "evaluate": eval_games,
+            "threads": threads,
+            "vision_epochs": vision_epochs,
+            "vision_synthetic_count": vision_syn,
+            "coevolve": False,
+            "continuous": False,
+        }
+        job_id = uuid4().hex
+        args = [
+            sys.executable, "-u", str(self.root / "xbow_recommended_pipeline.py"),
+            "--deck", deck,
+            "--run-dir", str(output),
+            "--ppo-updates", str(ppo_updates),
+            "--rollout-games", str(rollout_games),
+            "--eval-games-per-rival", str(eval_games),
+            "--threads", str(threads),
+            "--vision-epochs", str(vision_epochs),
+            "--vision-synthetic-count", str(vision_syn),
+            "--train-vision" if train_vision else "--no-train-vision",
+        ]
+        folder = self.store / job_id
+        folder.mkdir(parents=True, exist_ok=True)
+        save_json(folder / "job.json", {
+            "id": job_id,
+            "run_id": output.relative_to(self.runs).as_posix(),
+            "deck": deck,
+            "mode": "recommended",
+            "parameters": params,
+            "command": args,
+        })
+        save_json(folder / "state.json", {"status": "starting", "started": timestamp()})
+        kwargs = (
+            {"creationflags": subprocess.CREATE_NO_WINDOW | subprocess.CREATE_NEW_PROCESS_GROUP}
+            if os.name == "nt" else {"start_new_session": True}
+        )
+        self.child = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), str(folder)],
+            cwd=self.root, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL, **kwargs,
+        )
+        save_json(self.store / "latest.json", {"id": job_id, "pid": self.child.pid})
+        return self.current()
+
     def launch(self, request):
         deck, mode = request.get("deck"), request.get("mode")
-        if not isinstance(deck, str) or deck not in DECKS or mode not in ("new", "resume"):
+        if not isinstance(deck, str) or deck not in DECKS or mode not in ("new", "resume", "recommended"):
             raise ValueError("Escolha um deck e um tipo de treinamento válidos.")
+        if mode == "recommended":
+            return self._launch_recommended(request, deck)
         coevolve = request.get("coevolve", False)
         if type(coevolve) is not bool or (coevolve and (deck != "xbow_30" or mode != "resume")):
             raise ValueError("O treino conjunto está disponível ao retomar X-Bow 3.0.")
-        limits = {"updates": (1, 100), "games": (1, 32), "evaluate": (0, 48)}
+        total_cpus = os.cpu_count() or 4
+        max_threads = max(1, total_cpus - 1)
+        max_workers = max(1, min(12, total_cpus // 2))
+        limits = {
+            "updates": (1, 500), "games": (1, 256),
+            "evaluate": (0, 48), "threads": (1, max_threads),
+            "rollout_workers": (1, max_workers),
+        }
         if mode == "new":
             inventory = self.inventory.snapshot()
             if inventory["status"] != "ready":
@@ -257,30 +355,47 @@ class DashboardJobs:
         if type(continuous) is not bool or (continuous and not coevolve):
             raise ValueError("O treino contínuo requer o treino conjunto da X-Bow 3.0.")
         if continuous:
-            limits["games"] = (1, 8)
+            limits["games"] = (1, 256)
         for key, (low, high) in limits.items():
             if continuous and key in ("updates", "evaluate"):
                 params[key] = 0
                 continue
-            value = request.get(key, 4) if continuous and key == "games" else request.get(key)
+            default_val = (
+                min(64, 256) if continuous and key == "games"
+                else min(14, max_threads) if key == "threads"
+                else max_workers if key == "rollout_workers"
+                else None
+            )
+            value = request.get(key, default_val) if default_val is not None and key not in request else request.get(key)
+            if value is None and default_val is not None:
+                value = default_val
             if type(value) is not int or not low <= value <= high:
                 raise ValueError(f"Valor fora do intervalo permitido para {key}.")
             params[key] = value
-        if coevolve and not continuous:
-            params["games"] = 1
+        batch_size = request.get("batch_size", 128)
+        if type(batch_size) is not int or batch_size not in (64, 128, 256, 512):
+            raise ValueError("Escolha batch_size entre 64, 128, 256 ou 512.")
+        params["batch_size"] = batch_size
+        obs_profile = request.get("obs_profile", "v3")
+        if obs_profile not in ("v3", "live"):
+            raise ValueError("Perfil de visão inválido (use v3 ou live).")
+        params["obs_profile"] = obs_profile
         job_id = uuid4().hex
         args = [
             sys.executable, "-u", str(self.root / "xbow_dual_learning_pipeline.py"),
             "--deck", deck, "--ppo-updates", str(params["updates"]),
             "--rollout-games", str(params["games"]), "--evaluate", str(params["evaluate"]),
-            "--kl-coef", "0.3",
+            "--kl-coef", "0.12", "--threads", str(params["threads"]),
+            "--batch-size", str(params["batch_size"]),
+            "--rollout-workers", str(params["rollout_workers"]),
         ]
         if mode == "new":
             dataset = self.root / "replays"
             stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
             output = self.runs / f"assistido-{stamp}-{job_id[:5]}" / deck
             args += ["--parquet-path", str(dataset), "--matches", str(params["matches"]),
-                     "--epochs", str(params["epochs"]), "--disk-frames"]
+                     "--epochs", str(params["epochs"]), "--obs-profile", params["obs_profile"],
+                     "--disk-frames"]
         else:
             run_id = request.get("run_id")
             if not isinstance(run_id, str):
@@ -289,16 +404,22 @@ class DashboardJobs:
             if (not output.is_relative_to(self.runs) or output.name != deck
                     or not all((output / f"{stage}.pt").is_file() for stage in ("bc", "ppo"))):
                 raise ValueError("O experimento selecionado precisa ter os checkpoints de imitação e PPO.")
+            import torch
+            saved_ppo = torch.load(output / "ppo.pt", map_location="meta", weights_only=True)
+            if int(saved_ppo.get("architecture", 1)) < 3:
+                raise ValueError("Este experimento usa a arquitetura legada v2. Inicie um novo treino v3 ou live.")
             args += ["--bc-checkpoint", str(output / "bc.pt"), "--resume-ppo"]
         if coevolve:
             args.append("--coevolve")
         params["coevolve"] = coevolve
         if continuous:
             args += ["--continuous", "--parallel-games", str(params["games"])]
+        elif coevolve and params["games"] > 1:
+            args += ["--parallel-games", str(params["games"])]
         params["continuous"] = continuous
         args += ["--output", str(output)]
         folder = self.store / job_id
-        folder.mkdir()
+        folder.mkdir(parents=True, exist_ok=True)
         save_json(folder / "job.json", {
             "id": job_id, "run_id": output.relative_to(self.runs).as_posix(),
             "deck": deck, "mode": mode, "parameters": params, "command": args,

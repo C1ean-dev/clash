@@ -57,7 +57,11 @@ def replay_batches(part):
         yield from parquet.iter_batches(columns=REPLAY_COLUMNS, batch_size=512)
 
 
-def eligible_replay(tag, result, encoded, deck_by_cards, counts):
+EXCLUDED_CASUAL_BATTLE_TYPES = frozenset({"friendly", "clanMate"})
+
+
+def eligible_replay(tag, result, encoded, deck_by_cards, counts, *,
+                    competitive_only=False, keep_tags=None):
     if result not in ("victory", "defeat"):
         return None
     seat = int(result == "defeat")
@@ -75,6 +79,10 @@ def eligible_replay(tag, result, encoded, deck_by_cards, counts):
             raise ValueError("replay_tag ausente")
         if not isinstance(payload["events"], list):
             raise ValueError("events deve ser uma lista")
+        if (competitive_only and (not keep_tags or tag not in keep_tags)
+                and battle.get("battle_type") in EXCLUDED_CASUAL_BATTLE_TYPES):
+            counts["casual_filtered"] += 1
+            return None
     except (KeyError, IndexError, TypeError, ValueError, AttributeError):
         counts["invalid_rows"] += 1
         return None
@@ -82,16 +90,21 @@ def eligible_replay(tag, result, encoded, deck_by_cards, counts):
 
 
 def winning_replays(
-    path: Path, deck: str, counts: Counter,
+    path: Path, deck: str, counts: Counter, *,
+    competitive_only=False, keep_tags=None, deck_cards=None,
 ) -> Iterator[WinningReplay]:
-    deck_by_cards = {frozenset(DECKS[deck]): deck}
+    cards = deck_cards if deck_cards is not None else DECKS[deck]
+    deck_by_cards = {frozenset(cards): deck}
     seen: set[str] = set()
     for part in parquet_parts(path):
         for batch in replay_batches(part):
             tags, results, payloads = (batch.column(key).to_pylist() for key in REPLAY_COLUMNS)
             for tag, result, encoded in zip(tags, results, payloads, strict=True):
                 counts["rows"] += 1
-                match = eligible_replay(tag, result, encoded, deck_by_cards, counts)
+                match = eligible_replay(
+                    tag, result, encoded, deck_by_cards, counts,
+                    competitive_only=competitive_only, keep_tags=keep_tags,
+                )
                 if match is None:
                     continue
                 if tag in seen:
@@ -126,6 +139,21 @@ def replay_tags(part):
     return {deck: sorted(tags) for deck, tags in tags_by_deck.items()}
 
 
+ID_PLANE_KEYS = ("card_ids", "spell_ids", "unit_ids")
+
+
+def board_value(state, seat: int) -> float:
+    """Zero-sum, left/right-symmetric board advantage in [-1, 1] for BC critic pretraining."""
+    own = state.players[seat]
+    foe = state.players[1 - seat]
+    crown_diff = (own.crowns - foe.crowns) / 3.0
+    own_towers = sum(hp / max(1, maximum) for hp, maximum in zip(own.tower_hp, own.tower_max_hp))
+    foe_towers = sum(hp / max(1, maximum) for hp, maximum in zip(foe.tower_hp, foe.tower_max_hp))
+    tower_diff = (own_towers - foe_towers) / 3.0
+    elixir_diff = max(-1.0, min(1.0, (own.elixir_milli - foe.elixir_milli) / 10000.0))
+    return float(max(-1.0, min(1.0, 0.5 * crown_diff + 0.4 * tower_diff + 0.1 * elixir_diff)))
+
+
 @dataclass(frozen=True)
 class MatchSamples:
     tag: str
@@ -133,9 +161,12 @@ class MatchSamples:
     vector: np.ndarray
     mask: np.ndarray
     actions: np.ndarray
+    id_planes: np.ndarray | None = None
+    values: np.ndarray | None = None
 
     def frame(self, index):
-        return self.spatial[index], self.vector[index], self.mask[index]
+        ids = self.id_planes[index] if self.id_planes is not None else None
+        return self.spatial[index], self.vector[index], self.mask[index], ids
 
     def hands(self, acted, hand):
         return self.vector[acted, hand]
@@ -190,7 +221,8 @@ def reconstruct(env, replay: WinningReplay, seed: int, capture=None) -> MatchSam
             pending[seat].append((event["replay_tick_20hz"], None, candidates))
     parser = env.action_parser
     winner = SEATS[replay.seat]
-    spatial, vector, masks, labels = [], [], [], []
+    spatial, vector, masks, labels, id_planes, values = [], [], [], [], [], []
+    has_id_planes = all(key in obs[winner] for key in ID_PLANE_KEYS)
 
     # Stop at the final logged play. The eventual simulator winner is irrelevant.
     while env.agents and any(pending):
@@ -234,11 +266,16 @@ def reconstruct(env, replay: WinningReplay, seed: int, capture=None) -> MatchSam
         spatial.append(winning_obs["spatial"].astype(np.float16))
         vector.append(winning_obs["vector"].astype(np.float16))
         masks.append(np.packbits(winning_obs["action_mask"]))
+        if has_id_planes:
+            id_planes.append(np.concatenate([winning_obs[k] for k in ID_PLANE_KEYS], axis=0).astype(np.uint8, copy=False))
         labels.append(commands[winner])
+        values.append(board_value(state, replay.seat))
         obs, _, _, _, _ = env.step(commands)
 
     if any(pending):
         return "simulator ended before replay"
     return MatchSamples(
         replay.tag, np.stack(spatial), np.stack(vector), np.stack(masks), np.array(labels),
+        np.stack(id_planes) if has_id_planes else None,
+        np.asarray(values, dtype=np.float16),
     )

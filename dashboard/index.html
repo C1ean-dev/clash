@@ -15,36 +15,60 @@
   <aside class="sidebar">
     <a href="#visao" class="brand" aria-label="X-Bow Control, visão geral">
       <span class="insignia" aria-hidden="true"><i></i></span>
-      <span>X-Bow <strong>Control</strong><small>MONITOR DE TREINO</small></span>
+      <span>X-Bow <strong>Control</strong><small>INTELIGÊNCIA &amp; TREINO</small></span>
     </a>
-    <nav aria-label="Seções do painel">
-      <a href="#visao" aria-current="location"><span class="nav-mark overview" aria-hidden="true"></span>Visão geral</a>
-      <a href="#jogar"><span class="nav-mark rounds" aria-hidden="true"></span>Jogar contra a IA</a>
+    <nav aria-label="Módulos do painel">
+      <span class="nav-group">Análise &amp; Evolução</span>
+      <a href="#visao" data-nav="visao" aria-current="page"><span class="nav-mark overview" aria-hidden="true"></span>Visão geral</a>
+      <a href="#evolucao" data-nav="evolucao"><span class="nav-mark review" aria-hidden="true"></span>Evolução da IA</a>
+
+      <span class="nav-group">Treinamento &amp; Arena</span>
+      <a href="#treino" data-nav="treino"><span class="nav-mark command" aria-hidden="true"></span>Treinamento</a>
+      <a href="#arena" data-nav="arena"><span class="nav-mark rounds" aria-hidden="true"></span>Telemetria do treino</a>
+
+      <span class="nav-group">Batalha &amp; Jogo Real</span>
+      <a href="#jogar" data-nav="jogar"><span class="nav-mark rounds" aria-hidden="true"></span>Jogar contra a IA</a>
+      <a href="#ao-vivo" data-nav="ao-vivo"><span class="nav-mark overview" aria-hidden="true"></span>Jogo real &amp; Overlay</a>
+
+      <span class="nav-group">Estudo &amp; Catálogo</span>
+      <a href="#videos" data-nav="videos"><span class="nav-mark rounds" aria-hidden="true"></span>Vídeos Royale TV</a>
       <a href="/cartas-decks"><span class="nav-mark review" aria-hidden="true"></span>Cartas e decks</a>
-      <a href="#arena"><span class="nav-mark rounds" aria-hidden="true"></span>Arena do treino</a>
-      <a href="#videos"><span class="nav-mark rounds" aria-hidden="true"></span>Vídeos do Royale TV</a>
-      <a href="#rivais"><span class="nav-mark rounds" aria-hidden="true"></span>Rivais</a>
-      <a href="#validacao"><span class="nav-mark review" aria-hidden="true"></span>Validação</a>
-      <a href="#treino"><span class="nav-mark command" aria-hidden="true"></span>Treinamento assistido</a>
     </nav>
     <div class="sidebar-foot">
       <span class="source-dot"></span><span>IL_Replay<small id="dataset">Lendo partições…</small></span>
     </div>
   </aside>
+
   <main>
-    <header id="visao">
+    <header id="topo">
       <div class="topline">
-        <span>Clash Royale <b> / </b> X-Bow Control</span>
+        <span>Clash Royale <b>/</b> X-Bow Control <b>/</b> <strong id="breadcrumb-page">Visão geral</strong></span>
         <span class="connection"><i></i><span id="sync">Conectando</span></span>
       </div>
       <div class="page-heading">
-        <div><h1>Painel de treino</h1><p>Desempenho na arena e fidelidade aos replays.</p></div>
-        <div style="display:flex;gap:10px;align-items:center;flex-wrap:wrap">
+        <div>
+          <h1 id="page-title">Visão geral</h1>
+          <p id="page-subtitle">Resumo executivo de força na arena, saúde do PPO e qualidade do modelo.</p>
+        </div>
+        <div class="page-actions" id="page-actions">
           <a class="primary play-top-btn" href="#jogar">🎮 Jogar contra a IA</a>
-          <a class="secondary" href="#treino">Treinamento assistido</a>
+          <a class="secondary" href="#treino">Treinamento</a>
         </div>
       </div>
-      <div class="toolbar">
+
+      <div class="global-job-bar" id="global-job-bar" hidden>
+        <div class="global-job-info">
+          <span class="pulse-dot" aria-hidden="true"></span>
+          <strong id="global-job-title">Treino em andamento</strong>
+          <span id="global-job-detail" class="muted"></span>
+        </div>
+        <div class="global-job-actions">
+          <progress id="global-job-progress" max="1" value="0" aria-label="Progresso global do treino"></progress>
+          <a class="secondary" href="#treino" id="global-job-link">Acompanhar</a>
+        </div>
+      </div>
+
+      <div class="toolbar" id="global-toolbar">
         <div class="deck-switch" aria-label="Deck">
           <button type="button" data-deck="xbow_30" aria-pressed="true">X-Bow 3.0</button>
           <button type="button" data-deck="icebow" aria-pressed="false">IceBow</button>
@@ -52,287 +76,687 @@
         <label class="run-picker" for="run">Experimento <select id="run"></select></label>
       </div>
     </header>
-    <section class="panel play-panel" id="jogar" aria-labelledby="play-title">
-      <div class="section-head">
-        <div>
-          <h2 id="play-title">Batalha contra a IA</h2>
-          <p id="play-subtitle">Escolha seu deck e enfrente um dos modelos treinados.</p>
-        </div>
-        <span class="job-badge" id="play-badge">Pronto</span>
-      </div>
 
-      <div class="play-setup" id="play-setup">
-        <form id="play-form">
-          <div class="play-form-grid">
-            <label class="play-field">
-              Seu deck
-              <select id="play-human-deck">
-                <option value="hog_26">Corredor 2.6</option>
-                <option value="royal_giant">Gigante Real</option>
-                <option value="splashyard">Splashyard</option>
-                <option value="xbow_30">X-Bow 3.0</option>
-                <option value="icebow">IceBow</option>
-              </select>
+    <!-- ==================== PÁGINA 1: VISÃO GERAL ==================== -->
+    <div class="page-view" data-page="visao">
+      <div class="model-badges" id="model-badges" aria-label="Especificação do modelo"></div>
+      <section id="status-panel" class="run-status" aria-live="polite"></section>
+
+      <section class="hero" aria-labelledby="summary-title">
+        <div class="hero-court" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+        <div class="hero-body">
+          <div class="hero-head"><h2 id="summary-title">Vitórias na avaliação</h2><span id="comparison-delta"></span></div>
+          <div class="duel" id="score"></div>
+          <p id="samples" class="muted"></p>
+        </div>
+      </section>
+
+      <section class="metrics metrics-rich" id="metrics" aria-label="Indicadores de evolução da IA"></section>
+
+      <div class="overview-grid">
+        <section class="panel" aria-labelledby="ov-health-title">
+          <div class="section-head compact">
+            <div>
+              <h2 id="ov-health-title">Saúde do aprendizado (PPO)</h2>
+              <p>Diagnóstico automático da última atualização do cérebro.</p>
+            </div>
+            <a class="secondary" href="#evolucao">Abrir telemetria</a>
+          </div>
+          <div id="overview-health"></div>
+        </section>
+
+        <section class="panel" aria-labelledby="ov-matchups-title">
+          <div class="section-head compact">
+            <div>
+              <h2 id="ov-matchups-title">Desempenho por matchup</h2>
+              <p>Melhores e piores confrontos recentes contra o meta.</p>
+            </div>
+            <a class="secondary" href="#evolucao">Ver rivais &amp; PFSP</a>
+          </div>
+          <div id="overview-matchups"></div>
+        </section>
+      </div>
+    </div>
+
+    <!-- ==================== PÁGINA 2: EVOLUÇÃO & TELEMETRIA ==================== -->
+    <div class="page-view" data-page="evolucao" hidden>
+      <section class="panel chart-panel" aria-labelledby="chart-title">
+        <div class="section-head">
+          <div>
+            <h2 id="chart-title">Evolução do treino</h2>
+            <p id="chart-caption">Resultados por atualização do PPO</p>
+          </div>
+          <div class="chart-controls">
+            <label class="chart-toggle" for="chart-smooth">
+              <input id="chart-smooth" type="checkbox" checked>
+              Média móvel (5)
             </label>
-            <label class="play-field">
-              Oponente
-              <select id="play-ai-model" disabled>
-                <option value="">Carregando oponentes…</option>
-              </select>
-            </label>
-            <label class="play-field" id="play-rival-field" hidden>
-              Deck do Rival Live
-              <select id="play-rival-deck"></select>
-            </label>
-            <label class="play-field">
-              Velocidade
-              <select id="play-speed">
-                <option value="1" selected>1× · Tempo real</option>
-                <option value="0.75">0,75×</option>
-                <option value="0.5">0,5×</option>
-                <option value="1.5">1,5×</option>
+            <label class="chart-control" for="chart-metric">Métrica
+              <select id="chart-metric">
+                <optgroup label="Desempenho na Arena">
+                  <option value="win">Taxa de vitórias</option>
+                  <option value="net_damage">Saldo de dano nas torres</option>
+                  <option value="locks">Conexões de X-Bow na torre</option>
+                  <option value="leak">Elixir vazado (menor é melhor)</option>
+                  <option value="reward">Recompensa média</option>
+                </optgroup>
+                <optgroup label="Cérebro PPO (Estabilidade)">
+                  <option value="explained_var">Explained Variance (Crítico)</option>
+                  <option value="kl">Divergência KL (BC → PPO)</option>
+                  <option value="entropy">Entropia da política</option>
+                  <option value="clip_frac">Clip Fraction PPO</option>
+                </optgroup>
+                <optgroup label="Imitação (BC em Replays)">
+                  <option value="bc">Perda de imitação (NLL)</option>
+                  <option value="bc_acc">Acurácia de carta (BC)</option>
+                </optgroup>
               </select>
             </label>
           </div>
-          <div class="play-form-actions">
-            <button class="primary play-start-btn" id="play-start-btn" type="submit" disabled>Iniciar batalha</button>
-            <p class="play-setup-message" id="play-setup-message" role="status"></p>
+        </div>
+        <div class="plot" id="plot">
+          <canvas id="chart" role="img" aria-label="Histórico de desempenho no self-play"></canvas>
+          <div id="plot-tooltip" class="plot-tooltip" hidden></div>
+          <p id="chart-empty" class="empty" hidden>Aguardando a primeira atualização de self-play.</p>
+        </div>
+        <details id="history"><summary>Ver tabela completa de atualizações</summary><div id="history-table" class="table-wrap"></div></details>
+      </section>
+
+      <section class="panel" id="ppo-diagnostics-panel" aria-labelledby="ppo-diag-title">
+        <div class="section-head">
+          <div>
+            <h2 id="ppo-diag-title">Diagnóstico do Cérebro PPO</h2>
+            <p id="ppo-diagnostics-note">Indicadores internos de estabilidade, exploração e qualidade do crítico.</p>
+          </div>
+        </div>
+        <div id="ppo-diagnostics" class="diag-grid"></div>
+      </section>
+
+      <div class="evolution-split">
+        <section class="panel" id="rivais" aria-labelledby="rivals-title">
+          <div class="section-head">
+            <div>
+              <h2 id="rivals-title">Comparação pareada por rival</h2>
+              <p>Avaliação controlada: Imitação (BC) vs Self-Play (PPO).</p>
+            </div>
+          </div>
+          <div id="matchups"></div>
+        </section>
+
+        <section class="panel" id="pfsp-panel" aria-labelledby="pfsp-title">
+          <div class="section-head">
+            <div>
+              <h2 id="pfsp-title">Liga PFSP · Prioridade de treino</h2>
+              <p id="pfsp-note">O algoritmo foca mais partidas nos matchups onde a IA ainda perde.</p>
+            </div>
+          </div>
+          <div id="pfsp-board"></div>
+        </section>
+      </div>
+
+      <section class="panel" id="validacao" aria-labelledby="validation-title">
+        <div class="section-head">
+          <div>
+            <h2 id="validation-title">Validação em replays humanos</h2>
+            <p id="validation-note">Resultados nas partidas reservadas (holdout).</p>
+          </div>
+        </div>
+        <div id="validation-result"></div>
+      </section>
+    </div>
+
+    <!-- ==================== PÁGINA 3: TREINAMENTO ASSISTIDO ==================== -->
+    <div class="page-view" data-page="treino" hidden>
+      <section class="panel recommended-panel" id="treino-recomendado" aria-labelledby="recommended-title">
+        <div class="section-head">
+          <div>
+            <h2 id="recommended-title">Treinamento recomendado · Jogo real</h2>
+            <p id="recommended-subtitle">Pipeline completa de máxima performance: Visão YOLO + Meta Ao Vivo + AWR &amp; PPO nos 6 decks + Gate A/B.</p>
+          </div>
+          <span class="rec-badge">Pipeline recomendada</span>
+        </div>
+
+        <ol class="rec-steps" aria-label="Etapas da pipeline recomendada">
+          <li><strong>1. Visão YOLO</strong><span>Sintético + quadros e sprites reais</span></li>
+          <li><strong>2. Meta ao vivo</strong><span>Identifica decks que venceram a IA</span></li>
+          <li><strong>3. AWR + PPO</strong><span>Drilla os 6 arquétipos no RoyaleSim</span></li>
+          <li><strong>4. Gate A/B</strong><span>Só promove se vencer sem regressão</span></li>
+        </ol>
+
+        <div class="rec-pills" id="recommended-pills"></div>
+
+        <div class="rec-actions">
+          <button type="button" class="primary rec-start-btn" id="start-recommended">⚡ Iniciar pipeline recomendada</button>
+          <label class="rec-toggle" for="recommended-train-vision">
+            <input id="recommended-train-vision" type="checkbox" checked>
+            Incluir treino de visão YOLO (<code>custom_yolo.pt</code>)
+          </label>
+          <p class="muted" id="recommended-hint">Usa o melhor experimento do deck e promove <code>ppo_live.pt</code> automaticamente com hot-reload.</p>
+        </div>
+      </section>
+
+      <section class="panel trainer" id="treino" aria-labelledby="training-title">
+        <div class="section-head">
+          <div>
+            <h2 id="training-title">Treinamento assistido</h2>
+            <p id="training-deck">Deck selecionado · X-Bow 3.0</p>
+          </div>
+          <span class="job-badge" id="job-badge">Pronto</span>
+        </div>
+        <form id="training-form">
+          <fieldset id="training-settings">
+            <label class="training-slider">
+              <span class="slider-head"><span>Tipo de execução</span><span class="slider-value" aria-hidden="true">Novo treino</span></span>
+              <input id="training-mode" type="range" min="0" max="1" step="1" value="0" aria-valuetext="Novo treino" disabled>
+              <span class="slider-bounds" aria-hidden="true"><span>Novo treino</span><span>Retomar PPO</span></span>
+            </label>
+
+            <label class="training-slider training-select-card" data-new>
+              <span class="slider-head"><span>Perfil de visão (Arquitetura v3)</span><span class="slider-value" id="training-obs-badge">v3</span></span>
+              <select id="training-obs-profile">
+                <option value="v3" selected>v3 · Completo Simulador (66 canais)</option>
+                <option value="live">live · Tela Real / Overlay (34 canais)</option>
+              </select>
+              <span class="slider-bounds"><span>Use "live" para jogar no jogo real</span></span>
+            </label>
+
+            <label class="training-slider training-select-card">
+              <span class="slider-head"><span>Batch Size (BC / PPO)</span><span class="slider-value" id="training-batch-badge">128</span></span>
+              <select id="training-batch-size">
+                <option value="64">64 · Mais leve</option>
+                <option value="128">128 · Equilibrado</option>
+                <option value="256" selected>256 · Lotes grandes</option>
+                <option value="512">512 · Turbo GPU+Xeon</option>
+              </select>
+              <span class="slider-bounds"><span>Estabilidade do gradiente</span></span>
+            </label>
+
+            <label class="training-slider" data-new>
+              <span class="slider-head">
+                <span>Replays de imitação</span>
+                <span class="slider-head-right">
+                  <button type="button" class="mini-btn" id="training-max-replays" title="Selecionar todos os replays disponíveis">Todos</button>
+                  <span class="slider-value" aria-hidden="true">—</span>
+                </span>
+              </span>
+              <input id="training-matches" type="range" min="2" max="2" value="2" disabled>
+              <span class="slider-bounds" aria-hidden="true"><span>2</span><span id="training-replay-limit">—</span></span>
+            </label>
+
+            <label class="training-slider" data-new>
+              <span class="slider-head"><span>Épocas de imitação (BC)</span><span class="slider-value" aria-hidden="true">10</span></span>
+              <input id="training-epochs" type="range" min="1" max="30" value="10">
+              <span class="slider-bounds" aria-hidden="true"><span>1</span><span>30 · com early stopping</span></span>
+            </label>
+
+            <label class="training-slider">
+              <span class="slider-head"><span id="training-updates-title">Atualizações PPO</span><span class="slider-value" aria-hidden="true">10</span></span>
+              <input id="training-updates" type="range" min="1" max="500" value="10">
+              <span class="slider-bounds" aria-hidden="true"><span>1</span><span>500</span></span>
+            </label>
+
+            <label class="training-slider">
+              <span class="slider-head"><span>Partidas por atualização</span><span class="slider-value" aria-hidden="true">32</span></span>
+              <input id="training-games" type="range" min="1" max="256" value="32">
+              <span class="slider-bounds" aria-hidden="true"><span>1</span><span>256 (GPU RX 6600)</span></span>
+            </label>
+
+            <label class="training-slider">
+              <span class="slider-head"><span>Partidas por rival na avaliação</span><span class="slider-value" aria-hidden="true">6</span></span>
+              <input id="training-evaluate" type="range" min="0" max="48" value="6">
+              <span class="slider-bounds" aria-hidden="true"><span>0 · pular</span><span>48</span></span>
+            </label>
+
+            <label class="training-slider" id="training-workers-option">
+              <span class="slider-head"><span>Processos de Rollout (RX 6600 DirectML + Xeon)</span><span class="slider-value" aria-hidden="true">12</span></span>
+              <input id="training-rollout-workers" type="range" min="1" max="12" value="12">
+              <span class="slider-bounds" aria-hidden="true"><span>1 · sequencial</span><span id="training-rollout-workers-limit">12</span></span>
+            </label>
+
+            <label class="training-slider" id="training-threads-option">
+              <span class="slider-head"><span>Threads do PyTorch (Otimização)</span><span class="slider-value" aria-hidden="true">14</span></span>
+              <input id="training-threads" type="range" min="1" max="27" value="14">
+              <span class="slider-bounds" aria-hidden="true"><span>1</span><span id="training-threads-limit">27</span></span>
+            </label>
+
+            <label id="training-coevolve-option" hidden>
+              <input id="training-coevolve" type="checkbox">
+              Treinar X-Bow e a IA adversária juntas (Co-evolução nos 6 decks do meta + âncoras)
+            </label>
+            <label id="training-continuous-option" hidden>
+              <input id="training-continuous" type="checkbox">
+              Treino contínuo infinito até eu parar
+            </label>
+            <label class="training-slider" id="training-continuous-games-option" hidden>
+              <span class="slider-head"><span>Tabuleiros simultâneos (Partidas por lote)</span><span class="slider-value" aria-hidden="true">64</span></span>
+              <input id="training-continuous-games" type="range" min="1" max="256" value="64">
+              <span class="slider-bounds" aria-hidden="true"><span>1</span><span id="training-continuous-games-limit">256 (GPU RX 6600)</span></span>
+            </label>
+          </fieldset>
+          <div class="form-actions">
+            <button class="primary" id="start-training" type="submit">Iniciar treino</button>
+            <p class="muted" id="training-hint">Uma execução por vez. Use 0 para pular a avaliação.</p>
           </div>
         </form>
-      </div>
 
-      <div class="play-arena-area" id="play-arena-area" hidden>
-        <div class="battle-layout">
-          <div class="battle-stage" id="play-stage">
-            <div class="battle-scoreboard">
-              <div class="battle-side ai-side">
-                <strong>IA</strong><b id="play-ai-crowns" aria-label="Coroas da IA">0</b>
-              </div>
-              <div class="battle-clock-box">
-                <strong class="battle-clock" id="play-clock">3:00</strong>
-                <span id="play-clock-phase"></span>
-              </div>
-              <div class="battle-side human-side">
-                <b id="play-human-crowns" aria-label="Suas coroas">0</b><strong>Você</strong>
-              </div>
+        <div id="job-monitor" hidden>
+          <ol class="training-stages" id="training-stages" aria-label="Etapas do treinamento">
+            <li data-stage="replays">Replays</li><li data-stage="bc">Imitação</li>
+            <li data-stage="ppo">Self-play</li><li data-stage="evaluation">Avaliação</li>
+          </ol>
+          <div class="monitor-progress">
+            <div class="progress-label"><strong id="job-stage"></strong><span id="job-detail"></span></div>
+            <progress id="job-progress" aria-label="Progresso da etapa"></progress>
+          </div>
+          <div class="monitor-actions">
+            <button type="button" class="secondary" id="view-job" hidden>Ver experimento</button>
+            <a class="secondary" href="#arena">Abrir Telemetria</a>
+            <a class="secondary" href="#evolucao">Ver gráficos</a>
+            <button type="button" class="secondary stop" id="stop-job" hidden>Parar treino</button>
+          </div>
+          <details class="training-log" id="training-log"><summary>Registro da execução (stdout/stderr)</summary><pre id="job-log" tabindex="0"></pre></details>
+        </div>
+        <p class="training-error" id="training-error" role="alert" hidden></p>
+      </section>
+    </div>
+
+    <!-- ==================== PÁGINA 4: TELEMETRIA DO TREINO ==================== -->
+    <div class="page-view" data-page="arena" hidden>
+      <section class="panel arena-panel" id="arena" aria-labelledby="arena-title">
+        <div class="section-head">
+          <div><h2 id="arena-title">Telemetria do treino</h2><p id="arena-source">Carregando dados do treino…</p></div>
+          <a class="secondary" href="#treino">Ir para Treinamento</a>
+        </div>
+        <div id="arena-live">
+          <div class="arena-live-section">
+            <div class="arena-live-heading">
+              <h3>Evolução das IAs</h3>
+              <p id="arena-live-sample" class="muted">Resultados das partidas do treino conjunto</p>
             </div>
+            <div class="arena-trends">
+              <article class="arena-trend" data-arena-model="xbow">
+                <h4>X-Bow 3.0</h4><strong data-rate>—</strong><span data-delta></span>
+                <canvas width="320" height="42" aria-hidden="true"></canvas>
+                <small data-record>Aguardando resultados</small>
+              </article>
+              <article class="arena-trend" data-arena-model="rival">
+                <h4>Rival Live</h4><strong data-rate>—</strong><span data-delta></span>
+                <canvas width="320" height="42" aria-hidden="true"></canvas>
+                <small data-record>Aguardando resultados</small>
+              </article>
+            </div>
+          </div>
+          <div class="arena-live-section">
+            <div class="arena-live-heading">
+              <h3>Status e Métricas do Treino</h3>
+              <p id="arena-live-status" class="muted"></p>
+            </div>
+            <div id="arena-batch-bar" class="arena-batch-bar" hidden>
+              <div class="arena-batch-head">
+                <strong id="arena-batch-title">Lote em andamento</strong>
+                <span id="arena-batch-meta" class="muted"></span>
+              </div>
+              <progress id="arena-batch-progress" value="0" max="1"></progress>
+            </div>
+            <div class="arena-kpi-grid" id="arena-kpi-grid"></div>
+            <div class="arena-detail-grid" id="arena-detail-grid">
+              <section class="arena-detail-card">
+                <div class="arena-detail-head">
+                  <h4>Últimos lotes concluídos</h4>
+                  <small class="muted" id="arena-batches-caption">Histórico recente</small>
+                </div>
+                <div id="arena-batches-table" class="arena-table-wrap"></div>
+              </section>
+              <section class="arena-detail-card">
+                <div class="arena-detail-head">
+                  <h4>Taxa de vitória por deck rival (PFSP)</h4>
+                  <small class="muted" id="arena-pfsp-caption">Mais difíceis no topo</small>
+                </div>
+                <div id="arena-pfsp-list" class="arena-pfsp-list"></div>
+              </section>
+            </div>
+            <p class="empty" id="arena-live-empty" role="status" hidden>Aguardando dados do treino.</p>
+          </div>
+        </div>
+      </section>
+    </div>
 
-            <div class="battle-canvas-container">
-              <canvas id="play-board" tabindex="0" aria-label="Arena. Use as setas para escolher a casa e Enter para posicionar."></canvas>
-              <div id="play-opening-overlay" class="battle-overlay" hidden></div>
-              <div id="play-end-modal" class="battle-end-modal" role="dialog" aria-labelledby="play-result-title" hidden>
-                <div class="battle-end-card">
-                  <h3 id="play-result-title"></h3>
-                  <p id="play-result-detail"></p>
-                  <div class="battle-end-actions">
-                    <button type="button" class="primary" id="play-rematch-btn">Jogar de novo</button>
-                    <button type="button" class="secondary" id="play-new-match-btn">Trocar deck ou IA</button>
+    <!-- ==================== PÁGINA 5: JOGAR CONTRA A IA ==================== -->
+    <div class="page-view" data-page="jogar" hidden>
+      <section class="panel play-panel" id="jogar" aria-labelledby="play-title">
+        <div class="section-head">
+          <div>
+            <h2 id="play-title">Batalha contra a IA</h2>
+            <p id="play-subtitle">Escolha seu deck e enfrente um dos modelos treinados.</p>
+          </div>
+          <span class="job-badge" id="play-badge">Pronto</span>
+        </div>
+
+        <div class="play-setup" id="play-setup">
+          <form id="play-form">
+            <div class="play-form-grid">
+              <label class="play-field">
+                Seu deck
+                <select id="play-human-deck">
+                  <option value="hog_26">Corredor 2.6</option>
+                  <option value="royal_giant">Gigante Real</option>
+                  <option value="splashyard">Splashyard</option>
+                  <option value="log_bait">Log Bait</option>
+                  <option value="golem_beatdown">Golem Beatdown</option>
+                  <option value="pekka_bs">P.E.K.K.A Bridge Spam</option>
+                  <option value="xbow_30">X-Bow 3.0</option>
+                  <option value="icebow">IceBow</option>
+                </select>
+              </label>
+              <label class="play-field">
+                Oponente
+                <select id="play-ai-model" disabled>
+                  <option value="">Carregando oponentes…</option>
+                </select>
+              </label>
+              <label class="play-field" id="play-rival-field" hidden>
+                Deck do Rival Live
+                <select id="play-rival-deck"></select>
+              </label>
+              <label class="play-field">
+                Velocidade
+                <select id="play-speed">
+                  <option value="1" selected>1× · Tempo real</option>
+                  <option value="0.75">0,75×</option>
+                  <option value="0.5">0,5×</option>
+                  <option value="1.5">1,5×</option>
+                </select>
+              </label>
+            </div>
+            <div class="play-form-actions">
+              <button class="primary play-start-btn" id="play-start-btn" type="submit" disabled>Iniciar batalha</button>
+              <p class="play-setup-message" id="play-setup-message" role="status"></p>
+            </div>
+          </form>
+        </div>
+
+        <div class="play-arena-area" id="play-arena-area" hidden>
+          <div class="battle-layout">
+            <div class="battle-stage" id="play-stage">
+              <div class="battle-scoreboard">
+                <div class="battle-side ai-side">
+                  <strong>IA</strong><b id="play-ai-crowns" aria-label="Coroas da IA">0</b>
+                </div>
+                <div class="battle-clock-box">
+                  <strong class="battle-clock" id="play-clock">3:00</strong>
+                  <span id="play-clock-phase"></span>
+                </div>
+                <div class="battle-side human-side">
+                  <b id="play-human-crowns" aria-label="Suas coroas">0</b><strong>Você</strong>
+                </div>
+              </div>
+
+              <div class="battle-canvas-container">
+                <canvas id="play-board" tabindex="0" aria-label="Arena. Use as setas para escolher a casa e Enter para posicionar."></canvas>
+                <div id="play-opening-overlay" class="battle-overlay" hidden></div>
+                <div id="play-end-modal" class="battle-end-modal" role="dialog" aria-labelledby="play-result-title" hidden>
+                  <div class="battle-end-card">
+                    <h3 id="play-result-title"></h3>
+                    <p id="play-result-detail"></p>
+                    <div class="battle-end-actions">
+                      <button type="button" class="primary" id="play-rematch-btn">Jogar de novo</button>
+                      <button type="button" class="secondary" id="play-new-match-btn">Trocar deck ou IA</button>
+                    </div>
                   </div>
                 </div>
               </div>
+
+              <div class="battle-deck">
+                <div class="battle-hand-row">
+                  <div class="next-card-box">
+                    <span>Próxima</span>
+                    <div id="play-next-card" class="next-card-token"></div>
+                  </div>
+                  <div class="card-hand" id="play-hand" aria-label="Sua mão"></div>
+                </div>
+                <div class="elixir-box">
+                  <strong id="play-elixir-val">0 / 10</strong>
+                  <div class="elixir-bar" aria-hidden="true"><div class="elixir-fill" id="play-elixir-fill"></div></div>
+                </div>
+              </div>
+              <p class="battle-feedback" id="play-feedback" role="status"></p>
             </div>
 
-            <div class="battle-deck">
-              <div class="battle-hand-row">
-                <div class="next-card-box">
-                  <span>Próxima</span>
-                  <div id="play-next-card" class="next-card-token"></div>
-                </div>
-                <div class="card-hand" id="play-hand" aria-label="Sua mão"></div>
+            <aside class="battle-sidebar" aria-label="Controles e registro da batalha">
+              <div class="battle-sidebar-info">
+                <div><small>Oponente</small><strong id="play-ai-name"></strong></div>
+                <div><small>Seu deck</small><strong id="play-human-name"></strong></div>
               </div>
-              <div class="elixir-box">
-                <strong id="play-elixir-val">0 / 10</strong>
-                <div class="elixir-bar" aria-hidden="true"><div class="elixir-fill" id="play-elixir-fill"></div></div>
+              <div class="battle-quick-controls">
+                <button type="button" class="secondary" id="play-pause-btn" title="Atalho: Espaço">Pausar</button>
+                <select id="play-live-speed" aria-label="Velocidade durante a batalha">
+                  <option value="0.5">0,5×</option><option value="0.75">0,75×</option>
+                  <option value="1" selected>1×</option><option value="1.5">1,5×</option>
+                </select>
+                <button type="button" class="secondary" id="play-sound-btn" aria-pressed="true">Som</button>
+                <button type="button" class="secondary" id="play-fullscreen-btn" hidden>Tela cheia</button>
+                <button type="button" class="secondary stop" id="play-surrender-btn">Sair da partida</button>
+              </div>
+              <div class="battle-feed-box">
+                <h3>Últimas jogadas</h3>
+                <ol class="battle-moves-list" id="play-moves-list"></ol>
+              </div>
+            </aside>
+          </div>
+        </div>
+      </section>
+    </div>
+
+    <!-- ==================== PÁGINA 6: JOGO REAL & APRENDIZADO CONTÍNUO ==================== -->
+    <div class="page-view" data-page="ao-vivo" hidden>
+      <div class="model-badges" id="live-status-strip" aria-label="Status da captura e overlay"></div>
+
+      <section class="panel" id="live-control-panel" aria-labelledby="live-ctrl-title">
+        <div class="section-head">
+          <div>
+            <h2 id="live-ctrl-title">Central de Jogo Real (Google Play Games / scrcpy)</h2>
+            <p>Valide e troque o deck, salve os 8 templates reais, calibre a arena e ligue o Overlay transparente direto por aqui.</p>
+          </div>
+          <span class="job-badge" id="live-overlay-badge">Overlay parado</span>
+        </div>
+
+        <div class="live-workspace">
+          <div class="live-controls-col">
+            <div class="live-form-grid">
+              <label class="play-field">
+                Modelo da IA (recomendado: perfil live)
+                <select id="live-model-select"></select>
+              </label>
+              <label class="play-field">
+                Nível das torres
+                <select id="live-tower-level">
+                  <option value="11" selected>Nível 11 · Torneio (4824 / 3052)</option>
+                  <option value="12">Nível 12 (5304 / 3356)</option>
+                  <option value="13">Nível 13 (5832 / 3668)</option>
+                  <option value="14">Nível 14 (6408 / 4032)</option>
+                  <option value="15">Nível 15 · Elite (7032 / 4424)</option>
+                </select>
+              </label>
+              <label class="play-field">
+                Slot salvo do deck (para troca automática)
+                <select id="live-deck-slot">
+                  <option value="auto" selected>Automático (testa slots 1 a 5)</option>
+                  <option value="1">Slot 1</option>
+                  <option value="2">Slot 2</option>
+                  <option value="3">Slot 3</option>
+                  <option value="4">Slot 4</option>
+                  <option value="5">Slot 5</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="live-checks">
+              <label><input id="live-opt-record" type="checkbox" checked> Gravar partidas em <code>runs/live_matches</code></label>
+              <label><input id="live-opt-ensure-deck" type="checkbox" checked> Ir ao Deck e garantir deck correto antes de abrir o Overlay</label>
+            </div>
+
+            <div class="live-action-group">
+              <span class="live-group-label">1. Preparar Deck &amp; Visão</span>
+              <div class="live-actions-bar">
+                <button type="button" class="secondary" data-live-action="save_templates" title="Com X-Bow 3.0 aberto na aba Decks, salva os 8 recortes reais para >90% de precisão">💾 Salvar 8 templates</button>
+                <button type="button" class="secondary" data-live-action="check_deck">🔍 Validar deck</button>
+                <button type="button" class="secondary" data-live-action="ensure_deck">🔄 Trocar deck (cliques)</button>
+                <button type="button" class="secondary" data-live-action="calibrate">🎯 Calibrar arena</button>
               </div>
             </div>
-            <p class="battle-feedback" id="play-feedback" role="status"></p>
+
+            <div class="live-action-group">
+              <span class="live-group-label">2. Jogar ao Vivo &amp; Aprender</span>
+              <div class="live-actions-bar">
+                <button type="button" class="primary" id="live-start-btn" data-live-action="start_overlay">▶ Iniciar Overlay ao Vivo</button>
+                <button type="button" class="secondary stop" id="live-stop-btn" data-live-action="stop_overlay" hidden>⏹ Parar Overlay</button>
+                <button type="button" class="secondary" data-live-action="start_demo">👁 Testar Overlay (Demo)</button>
+                <button type="button" class="secondary" id="live-learn-btn" data-live-action="start_learn">🧠 Treinar com partidas reais (AWR)</button>
+              </div>
+            </div>
+
+            <details class="live-advanced">
+              <summary>Ordem das 8 cartas nos slots #1..#8 (para salvar templates)</summary>
+              <div class="live-advanced-body">
+                <label class="play-field">
+                  Ordem da esquerda para direita, cima para baixo (separadas por espaço ou vírgula)
+                  <input id="live-cards-order" type="text" value="x-bow tesla archers knight skeletons electro-spirit fireball the-log">
+                </label>
+              </div>
+            </details>
+
+            <p class="live-feedback" id="live-action-feedback" role="status" hidden></p>
+
+            <details class="training-log" id="live-log-wrap">
+              <summary>Log ao vivo do Overlay / AWR</summary>
+              <pre id="live-log" tabindex="0">Aguardando primeira ação…</pre>
+            </details>
           </div>
 
-          <aside class="battle-sidebar" aria-label="Controles e registro da batalha">
-            <div class="battle-sidebar-info">
-              <div><small>Oponente</small><strong id="play-ai-name"></strong></div>
-              <div><small>Seu deck</small><strong id="play-human-name"></strong></div>
+          <aside class="live-preview-col" aria-label="Pré-visualização da captura">
+            <div class="live-preview-head">
+              <strong>Pré-visualização da captura</strong>
+              <div class="live-preview-tabs">
+                <button type="button" class="mini-btn" id="live-tab-deck" data-preview-kind="deck" aria-pressed="true">Deck</button>
+                <button type="button" class="mini-btn" id="live-tab-arena" data-preview-kind="arena" aria-pressed="false">Arena</button>
+              </div>
             </div>
-            <div class="battle-quick-controls">
-              <button type="button" class="secondary" id="play-pause-btn" title="Atalho: Espaço">Pausar</button>
-              <select id="play-live-speed" aria-label="Velocidade durante a batalha">
-                <option value="0.5">0,5×</option><option value="0.75">0,75×</option>
-                <option value="1" selected>1×</option><option value="1.5">1,5×</option>
-              </select>
-              <button type="button" class="secondary" id="play-sound-btn" aria-pressed="true">Som</button>
-              <button type="button" class="secondary" id="play-fullscreen-btn" hidden>Tela cheia</button>
-              <button type="button" class="secondary stop" id="play-surrender-btn">Sair da partida</button>
-            </div>
-            <div class="battle-feed-box">
-              <h3>Últimas jogadas</h3>
-              <ol class="battle-moves-list" id="play-moves-list"></ol>
+            <div class="live-preview-frame" id="live-preview-frame">
+              <img id="live-preview-img" alt="Captura anotada do Clash Royale" hidden>
+              <p class="empty" id="live-preview-empty">Clique em <strong>Validar deck</strong> ou <strong>Calibrar arena</strong> para inspecionar o enquadramento aqui.</p>
             </div>
           </aside>
         </div>
-      </div>
-    </section>
-    <section class="panel trainer" id="treino" aria-labelledby="training-title">
-      <div class="section-head">
-        <div><h2 id="training-title">Treinamento assistido</h2><p id="training-deck">Deck selecionado · X-Bow 3.0</p></div>
-        <span class="job-badge" id="job-badge">Pronto</span>
-      </div>
-      <form id="training-form">
-        <fieldset id="training-settings">
-          <label class="training-slider">
-            <span class="slider-head"><span>Tipo de execução</span><span class="slider-value" aria-hidden="true">Novo treino</span></span>
-            <input id="training-mode" type="range" min="0" max="1" step="1" value="0" aria-valuetext="Novo treino" disabled>
-            <span class="slider-bounds" aria-hidden="true"><span>Novo treino</span><span>Retomar PPO</span></span>
-          </label>
-          <label class="training-slider" data-new>
-            <span class="slider-head"><span>Replays</span><span class="slider-value" aria-hidden="true">—</span></span>
-            <input id="training-matches" type="range" min="2" max="2" value="2" disabled>
-            <span class="slider-bounds" aria-hidden="true"><span>2</span><span id="training-replay-limit">—</span></span>
-          </label>
-          <label class="training-slider" data-new>
-            <span class="slider-head"><span>Épocas de imitação</span><span class="slider-value" aria-hidden="true">3</span></span>
-            <input id="training-epochs" type="range" min="1" max="30" value="3">
-            <span class="slider-bounds" aria-hidden="true"><span>1</span><span>30</span></span>
-          </label>
-          <label id="training-coevolve-option" hidden>
-            <input id="training-coevolve" type="checkbox">
-            Treinar X-Bow e a IA adversária na mesma partida
-          </label>
-          <label id="training-continuous-option" hidden>
-            <input id="training-continuous" type="checkbox">
-            Treino contínuo até eu parar
-          </label>
-          <label class="training-slider" id="training-continuous-games-option" hidden>
-            <span class="slider-head"><span>Partidas simultâneas</span><span class="slider-value" aria-hidden="true">4</span></span>
-            <input id="training-continuous-games" type="range" min="1" max="8" value="4">
-            <span class="slider-bounds" aria-hidden="true"><span>1</span><span>8</span></span>
-          </label>
-          <label class="training-slider">
-            <span class="slider-head"><span id="training-updates-title">Atualizações PPO</span><span class="slider-value" aria-hidden="true">4</span></span>
-            <input id="training-updates" type="range" min="1" max="100" value="4">
-            <span class="slider-bounds" aria-hidden="true"><span>1</span><span>100</span></span>
-          </label>
-          <label class="training-slider">
-            <span class="slider-head"><span>Partidas por atualização</span><span class="slider-value" aria-hidden="true">6</span></span>
-            <input id="training-games" type="range" min="1" max="32" value="6">
-            <span class="slider-bounds" aria-hidden="true"><span>1</span><span>32</span></span>
-          </label>
-          <label class="training-slider">
-            <span class="slider-head"><span>Partidas por rival na avaliação</span><span class="slider-value" aria-hidden="true">6</span></span>
-            <input id="training-evaluate" type="range" min="0" max="48" value="6">
-            <span class="slider-bounds" aria-hidden="true"><span>0 · pular</span><span>48</span></span>
-          </label>
-        </fieldset>
-        <div class="form-actions">
-          <button class="primary" id="start-training" type="submit">Iniciar treino</button>
-          <p class="muted" id="training-hint">Uma execução por vez. Use 0 para pular a avaliação.</p>
-        </div>
-      </form>
-      <div id="job-monitor" hidden>
-        <ol class="training-stages" id="training-stages" aria-label="Etapas do treinamento">
-          <li data-stage="replays">Replays</li><li data-stage="bc">Imitação</li>
-          <li data-stage="ppo">Self-play</li><li data-stage="evaluation">Avaliação</li>
-        </ol>
-        <div class="monitor-progress">
-          <div class="progress-label"><strong id="job-stage"></strong><span id="job-detail"></span></div>
-          <progress id="job-progress" aria-label="Progresso da etapa"></progress>
-        </div>
-        <div class="monitor-actions">
-          <button type="button" class="secondary" id="view-job" hidden>Ver experimento</button>
-          <button type="button" class="secondary stop" id="stop-job" hidden>Parar treino</button>
-        </div>
-        <details class="training-log" id="training-log"><summary>Registro da execução</summary><pre id="job-log" tabindex="0"></pre></details>
-      </div>
-      <p class="training-error" id="training-error" role="alert" hidden></p>
-    </section>
-    <section class="panel arena-panel" id="arena" aria-labelledby="arena-title">
-      <div class="section-head">
-        <div><h2 id="arena-title">Arena do treino</h2><p id="arena-source">Carregando os dados da arena…</p></div>
-      </div>
-      <div id="arena-live">
-        <div class="arena-live-section">
-          <div class="arena-live-heading">
-            <h3>Evolução das IAs</h3>
-            <p id="arena-live-sample" class="muted">Resultados das partidas do treino conjunto</p>
+      </section>
+
+      <section class="panel" id="auto-train-panel" aria-labelledby="auto-train-title">
+        <div class="section-head">
+          <div>
+            <h2 id="auto-train-title">Treinamento Real Autônomo (1v1 Clássico · Sem Troféus)</h2>
+            <p>A IA valida o modo <strong>1x1 Clássico</strong> (escudo azul — trava anti-troféus), joga em tempo real, grava cada partida, atualiza o modelo com AWR a cada N jogos e puxa a próxima partida.</p>
           </div>
-          <div class="arena-trends">
-            <article class="arena-trend" data-arena-model="xbow">
-              <h4>X-Bow 3.0</h4><strong data-rate>—</strong><span data-delta></span>
-              <canvas width="320" height="42" aria-hidden="true"></canvas>
-              <small data-record>Aguardando resultados</small>
-            </article>
-            <article class="arena-trend" data-arena-model="rival">
-              <h4>Rival Live</h4><strong data-rate>—</strong><span data-delta></span>
-              <canvas width="320" height="42" aria-hidden="true"></canvas>
-              <small data-record>Aguardando resultados</small>
-            </article>
+          <span class="job-badge" id="auto-train-badge">Parado</span>
+        </div>
+
+        <div class="auto-cursor-banner" id="auto-cursor-banner" hidden>
+          <div>
+            <strong>⚠ Cliques invisíveis ignorados pelo Google Play Games</strong>
+            <p class="muted">3 cliques em segundo plano (PostMessageW) não tiveram resposta na janela do jogo. A sessão foi pausada sem mexer no seu mouse. Deseja autorizar clique rápido com restauração instantânea do cursor?</p>
+          </div>
+          <button type="button" class="primary" data-live-action="confirm_cursor_fallback">✅ Autorizar cursor e retomar</button>
+        </div>
+
+        <div class="live-form-grid">
+          <label class="play-field">
+            Modo seguro
+            <select id="auto-mode">
+              <option value="classic_1v1" selected>1x1 Clássico (Sem Troféus · Nível 11)</option>
+              <option value="trainer_camp">Campo de Treino (Solo · zero risco)</option>
+            </select>
+          </label>
+          <label class="play-field">
+            Limite de partidas da sessão
+            <input id="auto-max-games" type="number" min="1" max="100" value="20">
+          </label>
+          <label class="play-field">
+            Aprender (AWR + hot-reload) a cada N jogos
+            <input id="auto-learn-every" type="number" min="1" max="50" value="5">
+          </label>
+        </div>
+
+        <div class="live-checks" style="margin-top:10px">
+          <label><input id="auto-show-overlay" type="checkbox" checked> Mostrar overlay de visão (caixas YOLO) e decisões da IA por cima do jogo</label>
+          <label><input id="auto-dry-run" type="checkbox"> Modo Simulação (dry-run — não clica, apenas testa a leitura e mostra o que faria)</label>
+        </div>
+
+        <div class="live-actions-bar" style="margin-top:12px">
+          <button type="button" class="primary" id="auto-start-btn" data-live-action="start_auto_train">▶ Iniciar Treino Real 1v1</button>
+          <button type="button" class="secondary stop" id="auto-stop-btn" data-live-action="stop_auto_train" hidden>⏹ Parar Emergência</button>
+        </div>
+
+        <div class="metrics auto-session-grid" id="auto-session-strip" style="margin-top:14px"></div>
+        <p class="muted" id="auto-session-msg" style="margin-top:4px"></p>
+      </section>
+
+      <section class="panel" id="ao-vivo" aria-labelledby="live-title">
+        <div class="section-head">
+          <div>
+            <h2 id="live-title">Prontidão Sim-to-Real</h2>
+            <p>Verificação automática do perfil de visão do modelo selecionado.</p>
           </div>
         </div>
-        <div class="arena-live-section">
-          <div class="arena-live-heading">
-            <h3>Partidas do treino</h3><p id="arena-live-status" class="muted"></p>
-          </div>
-          <div class="arena-live-grid" id="arena-live-grid"></div>
-          <p class="empty" id="arena-live-empty" role="status">Aguardando o treino.</p>
-        </div>
-      </div>
-    </section>
-    <section id="status-panel" class="run-status" aria-live="polite"></section>
-    <section class="hero" aria-labelledby="summary-title">
-      <div class="hero-court" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
-      <div class="hero-body">
-        <div class="hero-head"><h2 id="summary-title">Vitórias na avaliação</h2><span id="comparison-delta"></span></div>
-        <div class="duel" id="score"></div>
-        <p id="samples" class="muted"></p>
-      </div>
-    </section>
-    <section class="metrics" id="metrics" aria-label="Indicadores do treino"></section>
-    <section class="panel chart-panel" aria-labelledby="chart-title">
-      <div class="section-head">
-        <div><h2 id="chart-title">Evolução do treino</h2><p id="chart-caption">Resultados por atualização do PPO</p></div>
-        <label class="chart-control" for="chart-metric">Métrica
-          <select id="chart-metric"><option value="win">Taxa de vitórias</option><option value="locks">Conexões na torre</option><option value="reward">Recompensa média</option><option value="kl">Divergência KL</option><option value="bc">Perda de imitação (NLL)</option></select>
-        </label>
-      </div>
-      <div class="plot" id="plot">
-        <canvas id="chart" role="img" aria-label="Histórico de desempenho no self-play"></canvas>
-        <div id="plot-tooltip" class="plot-tooltip" hidden></div>
-        <p id="chart-empty" class="empty" hidden>Aguardando a primeira atualização de self-play.</p>
-      </div>
-      <details id="history"><summary>Ver dados do gráfico</summary><div id="history-table" class="table-wrap"></div></details>
-    </section>
-    <section class="panel" id="rivais" aria-labelledby="rivals-title">
-      <div class="section-head"><div><h2 id="rivals-title">Comparação por rival</h2><p>Vitórias e partidas disputadas para cada modelo.</p></div></div>
-      <div id="matchups"></div>
-    </section>
-    <section class="panel" id="validacao" aria-labelledby="validation-title">
-      <div class="section-head"><div><h2 id="validation-title">Validação em replays</h2><p id="validation-note">Resultados nas partidas reservadas.</p></div></div>
-      <div id="validation-result"></div>
-    </section>
-    <section id="videos" class="panel video-library" aria-labelledby="video-library-title">
-      <div class="section-head">
-        <div><h2 id="video-library-title">Vídeos do Royale TV</h2><p id="video-count" role="status">Carregando o catálogo AlphaClash…</p></div>
-      </div>
-      <div class="video-filters">
-        <label>Deck <select id="video-deck"><option value="">Todos</option><option value="xbow_30">X-Bow 3.0</option><option value="icebow">IceBow</option></select></label>
-        <label>Buscar <input id="video-search" type="search" placeholder="Carta ou ID da partida" maxlength="80"></label>
-        <label class="video-wins"><input id="video-wins" type="checkbox" disabled> Só vitórias do deck</label>
-      </div>
-      <div class="video-layout">
-        <div class="video-player" id="video-player">
-          <p id="video-instruction">Escolha uma partida para carregar o vídeo.</p>
-          <video id="video-library-player" controls playsinline preload="none" aria-label="Gravação do Clash Royale" hidden></video>
-          <p id="video-playing" hidden></p>
-          <a id="video-source-link" target="_blank" rel="noopener noreferrer" hidden>Abrir no AlphaClash</a>
-        </div>
-        <div class="video-browse">
-          <ul id="video-rows" class="video-rows" aria-label="Partidas do catálogo"></ul>
-          <div class="video-pages">
-            <button type="button" class="secondary" id="video-previous" disabled>Anterior</button><span id="video-page"></span>
-            <button type="button" class="secondary" id="video-next" disabled>Próxima</button>
+        <div id="live-readiness" class="live-readiness"></div>
+      </section>
+
+      <section class="metrics" id="live-kpis" aria-label="Resumo de partidas reais gravadas"></section>
+
+      <section class="panel" aria-labelledby="live-history-title">
+        <div class="section-head">
+          <div>
+            <h2 id="live-history-title">Partidas reais gravadas (runs/live_matches)</h2>
+            <p>Histórico gravado pelo overlay para fine-tuning AWR com proteção Reverse KL.</p>
           </div>
         </div>
-      </div>
-    </section>
+        <div id="live-matches-table"></div>
+      </section>
+
+      <section class="panel" aria-labelledby="live-cmds-title">
+        <details>
+          <summary><strong id="live-cmds-title">Comandos PowerShell equivalentes (uso opcional por terminal)</strong></summary>
+          <div id="live-commands" class="cmd-grid" style="margin-top:12px"></div>
+        </details>
+      </section>
+    </div>
+
+    <!-- ==================== PÁGINA 7: VÍDEOS DO ROYALE TV ==================== -->
+    <div class="page-view" data-page="videos" hidden>
+      <section id="videos" class="panel video-library" aria-labelledby="video-library-title">
+        <div class="section-head">
+          <div><h2 id="video-library-title">Vídeos do Royale TV</h2><p id="video-count" role="status">Carregando o catálogo AlphaClash…</p></div>
+        </div>
+        <div class="video-filters">
+          <label>Deck <select id="video-deck"><option value="">Todos</option><option value="xbow_30">X-Bow 3.0</option><option value="icebow">IceBow</option></select></label>
+          <label>Buscar <input id="video-search" type="search" placeholder="Carta ou ID da partida" maxlength="80"></label>
+          <label class="video-wins"><input id="video-wins" type="checkbox" disabled> Só vitórias do deck</label>
+        </div>
+        <div class="video-layout">
+          <div class="video-player" id="video-player">
+            <p id="video-instruction">Escolha uma partida para carregar o vídeo.</p>
+            <video id="video-library-player" controls playsinline preload="none" aria-label="Gravação do Clash Royale" hidden></video>
+            <p id="video-playing" hidden></p>
+            <a id="video-source-link" target="_blank" rel="noopener noreferrer" hidden>Abrir no AlphaClash</a>
+          </div>
+          <div class="video-browse">
+            <ul id="video-rows" class="video-rows" aria-label="Partidas do catálogo"></ul>
+            <div class="video-pages">
+              <button type="button" class="secondary" id="video-previous" disabled>Anterior</button><span id="video-page"></span>
+              <button type="button" class="secondary" id="video-next" disabled>Próxima</button>
+            </div>
+          </div>
+        </div>
+      </section>
+    </div>
+
     <footer><span>X-Bow Control</span><span id="updated"></span></footer>
   </main>
 </body>

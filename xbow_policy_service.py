@@ -23,7 +23,14 @@ def observation(message, spec):
         raise ValueError("A observacao contem valores nao finitos")
     if not np.isin(mask, [0, 1]).all() or not mask[0]:
         raise ValueError("A mascara deve ser binaria e permitir esperar")
-    return {"spatial": spatial, "vector": vector, "action_mask": mask.astype(bool)}
+    obs = {"spatial": spatial, "vector": vector, "action_mask": mask.astype(bool)}
+    for key, planes in (("card_ids", 2), ("spell_ids", 4), ("unit_ids", 2)):
+        if key in message:
+            arr = np.asarray(message[key], dtype=np.uint8)
+            if arr.shape != (planes, 32, 18):
+                raise ValueError(f"Dimensoes invalidas para {key}")
+            obs[key] = arr
+    return obs
 
 
 def describe_action(action):
@@ -43,6 +50,8 @@ def main():
     parser.add_argument("--deck", required=True, choices=DECKS)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--deterministic", action="store_true")
+    parser.add_argument("--temperature", type=float, default=0.45,
+                        help="Temperatura de amostragem quando nao deterministico (padrao: 0.45)")
     parser.add_argument("--public-frames", action="store_true",
                         help="Recebe quadros públicos cronológicos em vez de tensores")
     args = parser.parse_args()
@@ -52,7 +61,7 @@ def main():
     feed = None
     if args.public_frames:
         from xbow_public_feed import PublicFeed
-        feed = PublicFeed(args.deck)
+        feed = PublicFeed(args.deck, obs_profile=policy.obs_profile)
     try:
         for line in sys.stdin:
             try:
@@ -60,7 +69,9 @@ def main():
                 message = json.loads(line)
                 obs = feed.update(message) if feed is not None else observation(message, policy.spec)
                 start = perf_counter()
-                action, logp, _ = policy.decide(obs, "cpu", args.deterministic)
+                action, logp, _ = policy.decide(
+                    obs, "cpu", args.deterministic, temperature=args.temperature,
+                )
                 elapsed = (perf_counter() - start) * 1000
                 response = {
                     "action": action, **describe_action(action), "probability": float(np.exp(logp)),
@@ -69,6 +80,7 @@ def main():
                 if feed is not None:
                     response["tick"] = feed.tick
                     response["observation_ms"] = round((start - received) * 1000, 3)
+                    response["hud"] = feed.public_summary()
                     if response["kind"] == "play_card":
                         response["card"] = message["hand"][response["slot"]]
             except (KeyError, TypeError, ValueError) as exc:

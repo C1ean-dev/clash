@@ -434,38 +434,48 @@
 (() => {
   const el = id => document.getElementById(`arena-${id}`);
   if (!el("live")) return;
-  const {colors: tones, cardKey, spellCast, castVisible, createRenderer} = window.battleArt;
-  const liveTiles = new Map();
+  const {colors: tones} = window.battleArt;
   const trendCards = [...document.querySelectorAll("[data-arena-model]")];
   const trendWindow = 20;
-  const rivals = { bc: "Imitação", other_bc: "Imitação do outro deck", scripted: "X-Bow programado",
-    hog_push: "Corredor", rg_patient: "Gigante Real", random: "Aleatório",
-    hog_26: "Corredor 2.6", royal_giant: "Gigante Real", splashyard: "Splashyard" };
-  const cards = {xbow: "X-Bow", tesla: "Tesla", knight: "Cavaleiro", archers: "Arqueiras",
-    skeletons: "Esqueletos", fireball: "Bola de Fogo", log: "O Tronco", electrospirit: "Espírito Elétrico",
-    icespirits: "Espírito de Gelo", icewizard: "Mago de Gelo", rocket: "Foguete", tornado: "Tornado",
-    hogrider: "Corredor", musketeer: "Mosqueteira", cannon: "Canhão", icegolemite: "Golem de Gelo",
-    royalgiant: "Gigante Real", hunter: "Caçador", fisherman: "Pescador", ghost: "Fantasma Real",
-    lightning: "Relâmpago", graveyard: "Cemitério", poison: "Veneno", babydragon: "Bebê Dragão",
-    tombstone: "Lápide", barblog: "Barril de Bárbaro", megaminion: "Megasservo",
-    angrybarbarians: "Bárbaros de Elite", goblins: "Goblins", valkyrie: "Valquíria",
-    balloon: "Balão", infernotower: "Torre Inferno", bats: "Morcegos", miner: "Mineiro",
-    mortar: "Morteiro", witch: "Bruxa"};
-  const name = card => cards[cardKey(card)] || card;
-  const percent = new Intl.NumberFormat("pt-BR", { style: "percent", maximumFractionDigits: 2 });
-  const decimal = new Intl.NumberFormat("pt-BR", { maximumFractionDigits: 3 });
-  const signedPoints = new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 2, signDisplay: "exceptZero"});
-  let context = {};
-  let generation = 0;
-  let requesting = false;
+  const rivals = {
+    bc: "Imitação (BC)", other_bc: "BC outro deck", scripted: "X-Bow bot",
+    hog_push: "Corredor 2.6", rg_patient: "Gigante Real", splashyard_defend: "Splashyard",
+    log_bait_push: "Log Bait", golem_patient: "Golem Beatdown", pekka_push: "P.E.K.K.A BS",
+    random: "Aleatório", hog_26: "Corredor 2.6", royal_giant: "Gigante Real",
+    splashyard: "Splashyard", log_bait: "Log Bait", golem_beatdown: "Golem Beatdown",
+    pekka_bs: "P.E.K.K.A BS",
+  };
+  const intFmt = new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 0});
+  const decFmt = new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 2});
+  const dec3Fmt = new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 3});
+  const pctFmt = new Intl.NumberFormat("pt-BR", {style: "percent", maximumFractionDigits: 1});
+  const signedPoints = new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 1, signDisplay: "exceptZero"});
+  const signedInt = new Intl.NumberFormat("pt-BR", {maximumFractionDigits: 0, signDisplay: "exceptZero"});
 
-  function clock(ms) {
-    const seconds = Math.floor(ms / 1000);
-    return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+  const esc = v => String(v ?? "").replace(/[&<>"']/g, c => ({
+    "&": "&amp;", "<": "&lt;", ">": "&gt;", "\"": "&quot;", "'": "&#39;",
+  }[c]));
+
+  function rivalLabel(name) {
+    if (!name) return "Rival";
+    if (rivals[name]) return rivals[name];
+    if (name.startsWith("snapshot_")) return `Snapshot #${name.slice(9)}`;
+    if (name.startsWith("dyn_patient_")) return `Descoberto · ${name.slice(12)}`;
+    if (name.startsWith("dyn_push_")) return `Descoberto · ${name.slice(9)}`;
+    if (name.startsWith("dyn_defend_")) return `Descoberto · ${name.slice(11)}`;
+    if (name.startsWith("live_")) return `Deck real · ${name.slice(5)}`;
+    if (name.startsWith("replay_")) return `Deck meta · ${name.slice(7)}`;
+    return name;
   }
 
-  function rival(name) {
-    return rivals[name] || name?.replace(/^snapshot_/, "Versão anterior ") || "Rival";
+  function formatDuration(seconds) {
+    if (!Number.isFinite(seconds) || seconds < 0) return "—";
+    const s = Math.floor(seconds);
+    const h = Math.floor(s / 3600);
+    const m = Math.floor((s % 3600) / 60);
+    const rem = s % 60;
+    if (h > 0) return `${h}h ${String(m).padStart(2, "0")}m ${String(rem).padStart(2, "0")}s`;
+    return `${m}m ${String(rem).padStart(2, "0")}s`;
   }
 
   function winSummary(rows, model) {
@@ -474,12 +484,12 @@
       sum.games += result.games;
       sum.wins += result.wins;
       return sum;
-    }, { games: 0, wins: 0 });
-    return { ...tally, rate: tally.games ? tally.wins / tally.games : null };
+    }, {games: 0, wins: 0});
+    return {...tally, rate: tally.games ? tally.wins / tally.games : null};
   }
 
-  function renderTrends(live) {
-    const history = (live?.updates || []).filter(row => row.games > 0 && row.free?.games > 0).slice(-80)
+  function renderTrends(ctx) {
+    const history = (ctx?.updates || []).filter(row => row.games > 0 && row.free?.games > 0).slice(-80)
       .flatMap(row => row.match_results ? row.match_results.map(result => ({
         update: row.update, games: 1, wins: Number(result === "win"),
         free: {update: row.free.update, games: 1, wins: Number(result === "loss")},
@@ -494,11 +504,11 @@
       const current = winSummary(recent, model);
       const before = winSummary(previous, model);
       const delta = card.querySelector("[data-delta]");
-      card.querySelector("[data-rate]").textContent = current.rate === null ? "—" : percent.format(current.rate);
+      card.querySelector("[data-rate]").textContent = current.rate === null ? "—" : pctFmt.format(current.rate);
       delta.textContent = before.rate === null ? "" : `${signedPoints.format(100 * (current.rate - before.rate))} p.p.`;
       delta.dataset.direction = current.rate > before.rate ? "up" : current.rate < before.rate ? "down" : "flat";
       card.querySelector("[data-record]").textContent = current.games
-        ? `${current.wins} de ${current.games} vitórias · atualizações até ${model === "rival" ? recent.at(-1).free.update : recent.at(-1).update}`
+        ? `${current.wins} de ${current.games} vitórias · atualizações até #${model === "rival" ? recent.at(-1).free.update : recent.at(-1).update}`
         : "Taxa de vitórias indisponível";
       const graph = card.querySelector("canvas"), paint = graph.getContext("2d");
       paint.clearRect(0, 0, graph.width, graph.height);
@@ -517,113 +527,240 @@
     }
   }
 
-  function paintLiveBoard(tile) {
-    const { header, frames: snapshots } = tile.snapshot;
-    const frame = snapshots.at(-1);
-    const renderer = tile.renderer;
-    if (!frame || !renderer.begin(header)) return;
-    const casts = snapshots.flatMap(snapshot => snapshot.moves.map(move => spellCast({ ...move, ms: snapshot.ms },
-      { arena: header, pieces: snapshot.pieces }))).filter(cast => cast && castVisible(cast, frame.ms));
-    for (const cast of casts) renderer.drawCastArea(cast, frame.ms, header.height);
-    renderer.drawPieces(frame.pieces, header.height, piece => [piece[3], piece[4]]);
-    for (const cast of casts) renderer.drawCast(cast, frame.ms, header.height);
-  }
+  function renderTelemetry(ctx) {
+    const updates = Array.isArray(ctx?.updates) ? ctx.updates : [];
+    const progress = ctx?.progress || {};
+    const job = ctx?.job || null;
+    const active = Boolean(ctx?.active);
+    const modelInfo = ctx?.modelInfo || {};
+    const rec = ctx?.recommended || {};
+    const last = updates.at(-1) || null;
 
-  function renderLive({active, boards}) {
-    const ids = new Set(boards.map(board => board.header.id));
-    for (const [id, tile] of liveTiles) {
-      if (ids.has(id)) continue;
-      tile.card.remove();
-      liveTiles.delete(id);
+    // Header & status summary
+    const statusPhase = active
+      ? (progress.event === "ppo_game" && progress.done >= progress.games && progress.games > 0
+          ? "Otimizando pesos PPO (CPU Xeon)"
+          : (ctx.detail || "Treino em execução"))
+      : (updates.length ? `Última atualização #${last.update} concluída` : "Nenhum treino em andamento");
+    el("source").textContent = active
+      ? `Sessão ativa · ${job?.parameters?.coevolve ? "Co-evolução (X-Bow + Rival)" : "Self-Play PPO"}`
+      : "Telemetria acumulada do experimento";
+    el("live-status").textContent = statusPhase;
+
+    // Live batch progress bar
+    const batchBar = el("batch-bar");
+    const hasBatchProg = active && Number.isFinite(progress.games) && progress.games > 0;
+    batchBar.hidden = !hasBatchProg;
+    if (hasBatchProg) {
+      const done = Math.min(progress.games, Math.max(0, Number(progress.done || 0)));
+      const optimizing = progress.event === "ppo_game" && done >= progress.games;
+      el("batch-title").textContent = optimizing
+        ? `Lote #${progress.update || "—"} · ${intFmt.format(done)}/${intFmt.format(progress.games)} jogos concluídos — Otimizando redes PPO…`
+        : `Lote #${progress.update || "—"} · Simulando ${intFmt.format(done)} / ${intFmt.format(progress.games)} partidas na RX 6600`;
+      const pct = progress.games > 0 ? Math.round((done / progress.games) * 100) : 0;
+      el("batch-meta").textContent = `${pct}% · ${progress.rollout_workers || job?.parameters?.rollout_workers || 12} workers · batch ${job?.parameters?.batch_size || 512}`;
+      const bar = el("batch-progress");
+      bar.max = progress.games;
+      bar.value = done;
     }
-    for (const snapshot of boards) {
-      const { header, frames: snapshots } = snapshot;
-      let tile = liveTiles.get(header.id);
-      if (!tile) {
-        const card = document.createElement("article");
-        card.className = "arena-live-tile";
-        card.innerHTML = `<h4></h4><small></small><div class="arena-video"><canvas role="img"></canvas><time>0:00</time></div>
-          <div class="arena-live-teams"><span></span><span></span></div>`;
-        const canvas = card.querySelector("canvas");
-        const title = label(header);
-        card.querySelector("h4").textContent = title;
-        canvas.setAttribute("aria-label", title);
-        tile = { card, snapshot, renderer: createRenderer(canvas, () => paintLiveBoard(tile)) };
-        liveTiles.set(header.id, tile);
-        el("live-grid").append(card);
-      }
-      const oldFrame = tile.snapshot.frames.at(-1);
-      const frame = snapshots.at(-1);
-      const last = snapshots.findLast(item => item.moves.length)?.moves.at(-1);
-      const prediction = frame?.comparison?.model;
-      const current = prediction ? `Modelo · ${prediction.card ? name(prediction.card) : "Esperar"}`
-        : last?.card ? `Ao vivo · ${name(last.card)}` : "Ao vivo";
-      tile.card.querySelector("small").textContent = current;
-      tile.card.querySelector("time").textContent = frame ? clock(frame.ms) : "0:00";
-      tile.card.querySelectorAll(".arena-live-teams span").forEach((side, seat) => {
-        const own = header.seat === seat;
-        const teamName = header.joint ? (own ? "X-Bow 3.0" : "Rival Live") : (own ? "Modelo" : "Rival");
-        side.textContent = frame ? `${teamName} · ${decimal.format(frame.sides[seat].elixir)}` : teamName;
-        side.style.setProperty("--side-color", tones[seat]);
-      });
-      tile.snapshot = snapshot;
-      if (frame?.seq !== oldFrame?.seq || !tile.painted) {
-        paintLiveBoard(tile);
-        tile.painted = Boolean(frame);
-      }
+
+    // Aggregate totals
+    const totalExpGames = updates.reduce((s, r) => s + Number(r.games || 0), 0);
+    const totalExpWins = updates.reduce((s, r) => s + Number(r.wins || 0), 0);
+    const totalExpLosses = updates.reduce((s, r) => s + Number(r.losses || 0), 0);
+    const totalExpDraws = updates.reduce((s, r) => s + Number(r.draws || 0), 0);
+
+    const sessionStartUpd = Number(progress.session_start || 0);
+    const sessionUpdates = active && sessionStartUpd > 0
+      ? updates.filter(r => Number(r.update || 0) > sessionStartUpd)
+      : [];
+    const completedInProgress = Number(progress.completed_games || 0);
+    const sessionGamesFromUpdates = sessionUpdates.reduce((s, r) => s + Number(r.games || 0), 0);
+    const sessionGames = active ? Math.max(completedInProgress, sessionGamesFromUpdates) : 0;
+
+    // Speed & timing
+    const simS = Number(last?.simulation_seconds || 0);
+    const optS = Number(last?.optimization_seconds || 0);
+    const totalBatchS = simS + optS;
+    const lastGames = Number(last?.games || 0);
+    const simGph = simS > 0 && lastGames > 0 ? (lastGames / simS) * 3600 : null;
+    const effGph = totalBatchS > 0 && lastGames > 0 ? (lastGames / totalBatchS) * 3600 : null;
+    const elapsedS = active && job?.started ? Math.max(0, (Date.now() - Date.parse(job.started)) / 1000) : null;
+    const avgSessionGph = elapsedS && elapsedS > 15 && sessionGames > 0 ? (sessionGames / elapsedS) * 3600 : null;
+    const displayGph = effGph ?? avgSessionGph;
+    const gamesPerDay = displayGph ? displayGph * 24 : null;
+
+    // Last batch combat & PPO metrics
+    const lastWr = last && last.games > 0 ? (last.wins + 0.5 * (last.draws || 0)) / last.games : null;
+    const netDmg = last && Number.isFinite(last.mean_tower_damage_dealt) && Number.isFinite(last.mean_tower_damage_taken)
+      ? last.mean_tower_damage_dealt - last.mean_tower_damage_taken
+      : null;
+    const ppo = last?.ppo || {};
+    const klVal = Number.isFinite(last?.kl_bc_to_ppo) ? last.kl_bc_to_ppo : null;
+    const expVar = Number.isFinite(ppo.explained_variance) ? ppo.explained_variance : null;
+    const entropy = Number.isFinite(ppo.entropy) ? ppo.entropy : null;
+    const clipFrac = Number.isFinite(ppo.clip_fraction) ? ppo.clip_fraction : null;
+
+    const pfspMap = modelInfo?.pfsp_wr && typeof modelInfo.pfsp_wr === "object" ? modelInfo.pfsp_wr : {};
+    const pfspEntries = Object.entries(pfspMap)
+      .filter(([, wr]) => Number.isFinite(wr))
+      .sort((a, b) => a[1] - b[1]);
+    const hardest = pfspEntries[0] || null;
+    const easiest = pfspEntries.at(-1) || null;
+    const lastRivals = last?.rivals && typeof last.rivals === "object" ? last.rivals : {};
+    const rivalCountLast = Object.keys(lastRivals).length;
+
+    const hasAnyData = active || updates.length > 0 || pfspEntries.length > 0;
+    el("live-empty").hidden = hasAnyData;
+    el("kpi-grid").hidden = !hasAnyData;
+    el("detail-grid").hidden = !hasAnyData;
+    if (!hasAnyData) {
+      el("live-empty").textContent = "Nenhum dado de treino encontrado para este experimento. Inicie um treino na aba Treinamento.";
+      return;
     }
-    const running = boards.length;
-    el("source").textContent = active ? "Transmissão ao vivo" : "Nenhum treino em andamento";
-    el("live-status").textContent = active ? `${context.detail || "Preparando o treino"}${running ? ` · ${running} ao vivo` : ""}` : "";
-    el("live-empty").hidden = Boolean(boards.length);
-    el("live-empty").textContent = active ? "Aguardando os tabuleiros desta etapa." : "Nenhum treino em andamento. Inicie um treino no painel para acompanhar as partidas.";
-  }
 
-  function label(header) {
-    if (header.probe_card) return `${name(header.probe_card)} · replay ${header.replay.slice(0, 8)}`;
-    if (header.replay) return `Replay ${header.replay}`;
-    const parts = [];
-    if (header.update) parts.push(`Atualização ${header.update}`);
-    if (header.model) parts.push(header.model === "bc" ? "Imitação" : "PPO");
-    if (header.number) parts.push(`Partida ${header.number}`);
-    return [...parts, rival(header.rival)].join(" · ");
-  }
+    const klTone = klVal === null ? "" : (klVal <= 0.35 ? "good" : klVal <= 0.8 ? "warn" : "bad");
+    const wrTone = lastWr === null ? "" : (lastWr >= 0.55 ? "good" : lastWr >= 0.42 ? "warn" : "bad");
+    const evTone = expVar === null ? "" : (expVar >= 0.75 ? "good" : expVar >= 0.4 ? "warn" : "bad");
 
-  async function poll() {
-    if (requesting || !context.active) return;
-    requesting = true;
-    const version = generation;
-    const {deck, run, phase} = context;
-    const params = new URLSearchParams({stage: "live", deck, run, phase});
-    try {
-      const response = await fetch('/api/arena?' + params, {signal: AbortSignal.timeout(4000)});
-      if (!response.ok) throw new Error();
-      const data = await response.json();
-      if (version === generation) renderLive(data);
-    } catch {
-      if (version === generation) {
-        renderLive({active: true, boards: []});
-        el("live-status").textContent = "Aguardando conexão com o painel";
-      }
-    } finally {
-      requesting = false;
-      if (version !== generation) void poll();
+    const kpis = [
+      {
+        label: active ? "Partidas nesta sessão" : "Total de partidas",
+        value: active ? intFmt.format(sessionGames) : intFmt.format(totalExpGames),
+        tone: "accent",
+        sub: active
+          ? `Acumulado no experimento: ${intFmt.format(totalExpGames + Math.max(0, completedInProgress - sessionGamesFromUpdates))} · Update #${progress.update || last?.update || 0}`
+          : `${updates.length} atualizações · ${intFmt.format(totalExpWins)}V-${intFmt.format(totalExpLosses)}D-${intFmt.format(totalExpDraws)}E`,
+      },
+      {
+        label: "Velocidade real",
+        value: displayGph ? `${intFmt.format(displayGph)} j/h` : "Calculando…",
+        tone: displayGph && displayGph >= 3000 ? "good" : "",
+        sub: simGph
+          ? `Simulação: ${intFmt.format(simGph)} j/h · ~${intFmt.format(gamesPerDay)} jogos/dia`
+          : (avgSessionGph ? `Média da sessão · ~${intFmt.format(gamesPerDay)} jogos/dia` : "Aguardando 1º lote completo"),
+      },
+      {
+        label: "Ritmo & Tempo",
+        value: active ? formatDuration(elapsedS) : (totalBatchS > 0 ? formatDuration(totalBatchS) : "—"),
+        tone: "",
+        sub: totalBatchS > 0
+          ? `Último lote (${intFmt.format(lastGames)} j): sim ${decFmt.format(simS)}s · opt ${decFmt.format(optS)}s`
+          : (job?.parameters ? `Lote: ${job.parameters.games} jogos · ${job.parameters.threads} threads` : "Sem tempo registrado"),
+      },
+      {
+        label: "Desempenho (último lote)",
+        value: lastWr !== null ? pctFmt.format(lastWr) : "—",
+        tone: wrTone,
+        sub: last
+          ? `${last.wins}V-${last.losses}D-${last.draws || 0}E · Travas ${decFmt.format(last.mean_locks || 0)} · Dano ${netDmg !== null ? signedInt.format(netDmg) : "—"} · Leak ${decFmt.format(last.mean_elixir_leaked || 0)}`
+          : "Aguardando resultados do lote",
+      },
+      {
+        label: "Saúde PPO (Crítico & KL)",
+        value: expVar !== null ? `EV ${pctFmt.format(expVar)}` : "—",
+        tone: evTone || klTone,
+        sub: last
+          ? `KL ${klVal !== null ? dec3Fmt.format(klVal) : "—"} · Entropia ${entropy !== null ? decFmt.format(entropy) : "—"} · Clip ${clipFrac !== null ? pctFmt.format(clipFrac) : "—"}`
+          : "Aguardando métricas PPO",
+      },
+      {
+        label: "Diversidade & Motor",
+        value: `${6 + Number(rec.discovered_decks || 0)} decks`,
+        tone: "",
+        sub: hardest
+          ? `Mais difícil: ${rivalLabel(hardest[0])} (${pctFmt.format(hardest[1])})${rivalCountLast ? ` · ${rivalCountLast} no lote` : ""}`
+          : `RX 6600 DirectML + Xeon · ${easiest ? rivalLabel(easiest[0]) : "119 cartas"}`,
+      },
+    ];
+
+    el("kpi-grid").innerHTML = kpis.map(k => `
+      <article class="arena-kpi" data-tone="${esc(k.tone)}">
+        <span class="arena-kpi-label">${esc(k.label)}</span>
+        <strong class="arena-kpi-value">${esc(k.value)}</strong>
+        <small class="arena-kpi-sub">${esc(k.sub)}</small>
+      </article>`).join("");
+
+    // Recent completed batches table (newest first, up to 10)
+    const recentUpdates = updates.slice(-10).reverse();
+    el("batches-caption").textContent = updates.length
+      ? `Mostrando ${recentUpdates.length} de ${updates.length} atualizações`
+      : "Sem lotes concluídos";
+    if (recentUpdates.length) {
+      el("batches-table").innerHTML = `
+        <table class="arena-table">
+          <thead>
+            <tr>
+              <th>Lote</th>
+              <th>Jogos</th>
+              <th>Placar</th>
+              <th>WR</th>
+              <th>Travas</th>
+              <th>Dano líq.</th>
+              <th>KL</th>
+              <th>Sim / Opt</th>
+              <th>Jogos/h</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${recentUpdates.map(row => {
+              const g = Number(row.games || 0);
+              const wr = g > 0 ? (row.wins + 0.5 * (row.draws || 0)) / g : null;
+              const dmg = Number.isFinite(row.mean_tower_damage_dealt) && Number.isFinite(row.mean_tower_damage_taken)
+                ? row.mean_tower_damage_dealt - row.mean_tower_damage_taken : null;
+              const ss = Number(row.simulation_seconds || 0);
+              const os = Number(row.optimization_seconds || 0);
+              const gph = g > 0 && (ss + os) > 0 ? (g / (ss + os)) * 3600 : null;
+              const wrCls = wr === null ? "" : (wr >= 0.55 ? "good" : wr >= 0.42 ? "warn" : "bad");
+              return `
+                <tr>
+                  <td><strong>#${esc(row.update)}</strong></td>
+                  <td>${intFmt.format(g)}</td>
+                  <td>${row.wins}V-${row.losses}D${row.draws ? `-${row.draws}E` : ""}</td>
+                  <td class="tone-${wrCls}">${wr !== null ? pctFmt.format(wr) : "—"}</td>
+                  <td>${Number.isFinite(row.mean_locks) ? decFmt.format(row.mean_locks) : "—"}</td>
+                  <td>${dmg !== null ? signedInt.format(dmg) : "—"}</td>
+                  <td>${Number.isFinite(row.kl_bc_to_ppo) ? dec3Fmt.format(row.kl_bc_to_ppo) : "—"}</td>
+                  <td>${ss > 0 ? `${Math.round(ss)}s / ${Math.round(os)}s` : "—"}</td>
+                  <td>${gph ? intFmt.format(gph) : "—"}</td>
+                </tr>`;
+            }).join("")}
+          </tbody>
+        </table>`;
+    } else {
+      el("batches-table").innerHTML = `<p class="empty">Nenhum lote finalizado ainda.</p>`;
+    }
+
+    // PFSP rival deck win rates (hardest -> easiest)
+    el("pfsp-caption").textContent = pfspEntries.length
+      ? `${pfspEntries.length} rivais monitorados · foco automático nos mais difíceis`
+      : "Sem histórico PFSP";
+    if (pfspEntries.length) {
+      el("pfsp-list").innerHTML = pfspEntries.slice(0, 14).map(([rKey, wr]) => {
+        const pct = Math.max(0, Math.min(100, wr * 100));
+        const tone = wr >= 0.65 ? "good" : wr >= 0.40 ? "warn" : "bad";
+        const lastCount = lastRivals[rKey] || 0;
+        return `
+          <div class="arena-pfsp-row">
+            <div class="arena-pfsp-meta">
+              <span class="arena-pfsp-name">${esc(rivalLabel(rKey))}</span>
+              <span class="arena-pfsp-right">
+                ${lastCount ? `<small class="arena-pfsp-count">${lastCount} no lote</small>` : ""}
+                <strong class="tone-${tone}">${pctFmt.format(wr)}</strong>
+              </span>
+            </div>
+            <div class="arena-pfsp-track"><span class="arena-pfsp-fill tone-${tone}" style="width:${pct.toFixed(1)}%"></span></div>
+          </div>`;
+      }).join("");
+    } else {
+      el("pfsp-list").innerHTML = `<p class="empty">Aguardando dados de confrontos por deck.</p>`;
     }
   }
 
   window.trainingArena = {
     update(selection) {
-      const changed = context.run !== selection.run || context.phase !== selection.phase ||
-        context.active !== selection.active;
-      context = selection;
-      renderTrends(context);
-      if (changed) {
-        generation += 1;
-        renderLive({active: context.active, boards: []});
-        void poll();
-      }
+      renderTrends(selection);
+      renderTelemetry(selection);
     },
   };
-  new ResizeObserver(() => liveTiles.forEach(paintLiveBoard)).observe(el("live-grid"));
-  setInterval(poll, 900);
 })();

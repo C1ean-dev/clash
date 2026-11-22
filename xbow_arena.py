@@ -34,6 +34,7 @@ class ArenaCapture:
         board_id = uuid4().hex
         self.path = folder / f"{stage}-{board_id}.json"
         self.temporary = self.path.with_suffix(".tmp")
+        self.path.parent.mkdir(parents=True, exist_ok=True)
         self.parser = env.action_parser
         self.cards = {card.card_id: card.name for card in env.engine.cards()}
         self.units = dict(enumerate(env.engine.unit_types()))
@@ -65,7 +66,8 @@ class ArenaCapture:
         if self.last_publish is not None and now - self.last_publish < PUBLISH_INTERVAL:
             return
         snapshot = {"header": self.header, "frames": list(self.frames)}
-        with suppress(PermissionError):
+        with suppress(PermissionError, FileNotFoundError):
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             self.temporary.write_text(
                 json.dumps(snapshot, ensure_ascii=False, separators=(",", ":")), encoding="utf-8",
             )

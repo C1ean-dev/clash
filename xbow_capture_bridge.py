@@ -19,8 +19,21 @@ REFERENCE_WIDTH, REFERENCE_HEIGHT = 568, 896
 GRID = (-0.9320463320, 72.5462235650, 569.2610038610, 879.9748640483)
 TICKS_PER_SECOND = 20
 DECISION_TICKS = 10
-ALIASES = {"xbow": "x-bow", "log": "the-log", "archer": "archers",
-           "skeleton": "skeletons", "minion": "minions"}
+ALIASES = {
+    "xbow": "x-bow", "log": "the-log", "archer": "archers",
+    "skeleton": "skeletons", "minion": "minions", "barbarian": "barbarians",
+    "bat": "bats", "brawler": "goblin-cage", "elite-barbarian": "elite-barbarians",
+    "elixir-golem-large": "elixir-golem", "elixir-golem-medium": "elixir-golem",
+    "elixir-golem-small": "elixir-golem", "fire-cracker": "firecracker",
+    "goblin": "goblins", "golemite": "golem", "guard": "guards",
+    "hog": "royal-hogs", "lava-pup": "lava-hound", "minipekka": "mini-pekka",
+    "phoenix-egg": "phoenix", "phoenix-large": "phoenix", "phoenix-small": "phoenix",
+    "rascal-boy": "rascals", "rascal-girl": "rascals",
+    "royal-guardian": "little-prince", "royal-hog": "royal-hogs",
+    "royal-recruit": "royal-recruits", "skeleton-dragon": "skeleton-dragons",
+    "spear-goblin": "spear-goblins", "wall-breaker": "wall-breakers",
+    "zappy": "zappies",
+}
 
 
 def card_key(label):
@@ -45,7 +58,8 @@ def arena_position(center, crop):
 
 
 class CaptureBridge:
-    def __init__(self, deck, own_max=(4824, 3052, 3052), opponent_max=(4824, 3052, 3052)):
+    def __init__(self, deck, own_max=(4824, 3052, 3052), opponent_max=(4824, 3052, 3052),
+                 *, allow_mid_match: bool = False):
         engine = RustEngine()
         infos = {card.name: card for card in engine.cards()}
         self.catalogue = {key: infos[name] for key, name in CARD_NAMES.items() if name in infos}
@@ -53,6 +67,7 @@ class CaptureBridge:
         self.deck = frozenset(DECKS[deck])
         self.own_max = tuple(own_max)
         self.opponent_max = tuple(opponent_max)
+        self.allow_mid_match = bool(allow_mid_match)
         self.unrecognized = set()
         self.reset()
 
@@ -130,7 +145,9 @@ class CaptureBridge:
         if not state:
             return None
         new_match = self.start is None
-        if new_match and (state.get("overtime") or float(state.get("time_left_s") or 0) < 178):
+        if new_match and not self.allow_mid_match and (
+            state.get("overtime") or float(state.get("time_left_s") or 0) < 178
+        ):
             raise ValueError("A captura começou após a abertura da partida.")
         start = timestamp if new_match else self.start
         tick = round((timestamp - start) * TICKS_PER_SECOND)

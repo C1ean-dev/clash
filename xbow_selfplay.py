@@ -10,14 +10,21 @@ from time import perf_counter
 
 import numpy as np
 import torch
-from royalegym.opponents import PatientOpponent, PushOpponent
+from royalegym.opponents import DefendOpponent, PatientOpponent, PushOpponent
 from royalegym.protocol import MatchSetup
 from royaleimitate.replays import CARD_NAMES
 
 from xbow_arena import ArenaCapture, arena_enabled
-from xbow_environment import ELIXIR_TRADE_WEIGHT, PPO_GAMMA, XBOW_LOCK_WEIGHT, XBowLockReward, battle_env
+from xbow_environment import (
+    ELIXIR_TRADE_WEIGHT, PPO_GAMMA, XBOW_LOCK_WEIGHT, XBowLockReward, battle_env, pack_id_planes,
+)
 from xbow_replays import SEATS
-from xbow_training import frozen_policy, load_checkpoint, optimize_ppo, save_checkpoint
+from xbow_gpu_rollout import GpuBatchedRolloutPool, create_rollout_pool, directml_available
+from xbow_rollout_pool import RolloutWorkerPool, default_rollout_workers
+from xbow_training import (
+    frozen_policy, load_checkpoint, optimize_ppo, save_checkpoint, scheduled_kl_coef,
+    stratified_ppo_subsample, warmup_value_head,
+)
 from xbow_metrics import check_training_stop, read_run_journal
 
 
@@ -44,6 +51,10 @@ class Match:
 TACTICAL_RIVALS = {
     "hog_push": PushOpponent(),
     "rg_patient": PatientOpponent(),
+    "splashyard_defend": DefendOpponent(),
+    "log_bait_push": PushOpponent(),
+    "golem_patient": PatientOpponent(),
+    "pekka_push": PushOpponent(),
 }
 
 
@@ -51,6 +62,12 @@ def scripted_move(env, seat, obs, rng, kind):
     mask = obs["action_mask"]
     if kind in TACTICAL_RIVALS:
         return TACTICAL_RIVALS[kind].act(obs, mask, rng)
+    if isinstance(kind, str) and kind.startswith("dyn_"):
+        if kind.startswith("dyn_patient_"):
+            return TACTICAL_RIVALS["golem_patient"].act(obs, mask, rng)
+        if kind.startswith("dyn_defend_"):
+            return TACTICAL_RIVALS["splashyard_defend"].act(obs, mask, rng)
+        return TACTICAL_RIVALS["hog_push"].act(obs, mask, rng)
     if kind == "random":
         return int(rng.choice(np.flatnonzero(mask))) if rng.random() < 0.35 else 0
 
@@ -95,9 +112,58 @@ def advantage_targets(rewards, values, bootstrap, gamma=PPO_GAMMA, gae_lambda=0.
     return advantages, advantages + np.asarray(values, dtype=np.float32)
 
 
+class PFSPPool:
+    """Prioritized Fictitious Self-Play matchmaker focusing on lowest win-rate opponents."""
+
+    def __init__(self, initial_wr: dict[str, float] | None = None, *,
+                 alpha: float = 0.25, floor: float = 0.15, max_share: float = 0.28):
+        self.alpha = float(alpha)
+        self.floor = float(floor)
+        self.max_share = float(max_share)
+        self.ema_wr: dict[str, float] = {k: float(v) for k, v in (initial_wr or {}).items()}
+
+    def record(self, name: str, result: str):
+        score = 1.0 if result == "win" else 0.5 if result == "draw" else 0.0
+        prev = self.ema_wr.get(name, 0.5)
+        self.ema_wr[name] = (1.0 - self.alpha) * prev + self.alpha * score
+
+    def weights(self, names: list[str]) -> np.ndarray:
+        n = len(names)
+        if n == 0:
+            return np.empty(0, dtype=np.float64)
+        raw = np.array(
+            [(1.0 - self.ema_wr.get(name, 0.5)) ** 2 + self.floor for name in names],
+            dtype=np.float64,
+        )
+        total = raw.sum()
+        probs = raw / total if total > 0 else np.full(n, 1.0 / n)
+        # Water-filling cap prevents a single hard matchup (e.g. pekka_bs) from starving the rest of the meta.
+        if n >= 4 and self.max_share > (1.0 / n) + 1e-6:
+            capped = np.zeros(n, dtype=bool)
+            for _ in range(n):
+                over = (~capped) & (probs > self.max_share)
+                if not over.any():
+                    break
+                probs[over] = self.max_share
+                capped |= over
+                free = ~capped
+                if not free.any():
+                    break
+                rem = max(0.0, 1.0 - float(probs[capped].sum()))
+                free_sum = float(probs[free].sum())
+                probs[free] = probs[free] * (rem / free_sum) if free_sum > 0 else rem / int(free.sum())
+            probs = probs / probs.sum()
+        return probs
+
+    def sample_indices(self, names: list[str], count: int, rng) -> list[int]:
+        probs = self.weights(names)
+        return [int(idx) for idx in rng.choice(len(names), size=count, replace=True, p=probs)]
+
+
 class Rollout:
     def __init__(self, collect):
         self.frames = ([], [], []) if collect else None
+        self.id_planes = [] if collect else None
         self.actions, self.logp, self.rewards, self.values = [], [], [], []
         self.reward = self.locks = self.plays = self.steps = 0
         self.reward_step_abs = Counter()
@@ -106,9 +172,12 @@ class Rollout:
         action, logp, value = decision
         if self.frames is not None:
             spatial, vector, mask = self.frames
-            spatial.append(obs["spatial"])
-            vector.append(obs["vector"])
+            spatial.append(obs["spatial"].astype(np.float16, copy=False))
+            vector.append(obs["vector"].astype(np.float16, copy=False))
             mask.append(np.asarray(obs["action_mask"], dtype=bool))
+            ids = pack_id_planes(obs)
+            if ids is not None:
+                self.id_planes.append(ids)
             self.actions.append(action)
             self.logp.append(logp)
             self.values.append(value)
@@ -139,8 +208,9 @@ class Rollout:
 
     def finish(self, bootstrap):
         advantage, returns = advantage_targets(self.rewards, self.values, bootstrap)
+        packed_ids = np.stack(self.id_planes) if self.id_planes else None
         return (*map(np.stack, self.frames), np.asarray(self.actions),
-                np.asarray(self.logp, dtype=np.float32), advantage, returns)
+                np.asarray(self.logp, dtype=np.float32), packed_ids, advantage, returns)
 
 
 def game_steps(env, policy, seat, seed, device, collect=False, capture=None, *,
@@ -202,7 +272,12 @@ def decide_batch(policy, inputs, device):
         torch.as_tensor(np.stack([obs[key] for obs in observations]), device=device)
         for key in ("spatial", "vector", "action_mask")
     ]
-    distribution, values = policy(spatial, vector, mask.bool())
+    id_planes = None
+    if getattr(policy, "architecture", 2) >= 3 and pack_id_planes(observations[0]) is not None:
+        id_planes = torch.as_tensor(
+            np.stack([pack_id_planes(obs) for obs in observations]), device=device,
+        )
+    distribution, values = policy(spatial, vector, mask.bool(), id_planes=id_planes)
     if all(generator is None for generator in generators):
         actions = distribution.sample()
     else:
@@ -270,6 +345,10 @@ def rollout_tensors(trajectories, device):
     trajectories.clear()
     data = []
     for column in columns:
+        if column[0] is None:
+            data.append(None)
+            column.clear()
+            continue
         packed = column[0] if len(column) == 1 else np.concatenate(column)
         data.append(torch.as_tensor(packed, device=device))
         del packed
@@ -353,6 +432,10 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
             if trainer is None:
                 raise ValueError("O checkpoint PPO antigo nao inclui o estado do treinador.")
             start_update = ppo_saved["metrics"]["update"]
+    obs_profile = policy.obs_profile
+    reward_profile = getattr(args, "reward", None) or "potential"
+    kl_direction = getattr(args, "kl_direction", "reverse")
+    kl_decay = not getattr(args, "no_kl_decay", False)
     other_deck = "icebow" if args.deck == "xbow_30" else "xbow_30"
     rivals = [
         Rival("bc", args.deck, reference), Rival("scripted", other_deck),
@@ -361,16 +444,20 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
     other_path = output.parent / other_deck / "bc.pt"
     if other_path.is_file():
         other_bc, _ = load_checkpoint(other_path, other_deck, device, memory_format=layout)
-        rivals.append(Rival("other_bc", other_deck, frozen_policy(other_bc)))
+        if other_bc.obs_profile == obs_profile:
+            rivals.append(Rival("other_bc", other_deck, frozen_policy(other_bc)))
     evaluation_rivals = rivals + [Rival("random", args.deck)]
     league = list(rivals)
     optimizer = torch.optim.AdamW(policy.parameters(), lr=1e-4)
     rng = np.random.default_rng(args.seed)
     extra_trainer = {}
+    pfsp = PFSPPool()
     if args.resume_ppo:
         restore_training_state(trainer, optimizer, rng, device)
         if "free_model" in trainer:
             extra_trainer["free_model"] = trainer["free_model"]
+        if "pfsp_wr" in trainer:
+            pfsp = PFSPPool(trainer["pfsp_wr"])
         snapshots = sorted((output / "league").glob("*.pt"))
         snapshots = [path for path in snapshots if int(path.stem) <= start_update]
         for path in snapshots[-6:]:
@@ -382,9 +469,34 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
         else DEFAULT_PARALLEL_GAMES
     )
     parallel_games = getattr(args, "parallel_games", None) or default_parallel
+    requested_workers = getattr(args, "rollout_workers", None)
+    rollout_workers = (
+        default_rollout_workers(parallel_games, device)
+        if requested_workers is None else max(1, int(requested_workers))
+    )
+    if device != "cpu":
+        rollout_workers = 1
+    use_pool = (
+        rollout_workers > 1
+        or (requested_workers is None and device == "cpu" and directml_available())
+    )
+    worker_pool = (
+        create_rollout_pool(
+            rollout_workers, obs_profile, reward_profile, output,
+            parallel_games=max(parallel_games, args.rollout_games),
+        )
+        if use_pool else None
+    )
     envs = defaultdict(list)
 
-    def play_matches(stage, tested, matches, *, collect=False, **metadata):
+    def play_matches(stage, tested, matches, *, collect=False, policy_key="policy",
+                     force_sync_policy=True, **metadata):
+        if worker_pool is not None and len(matches) > 1:
+            yield from worker_pool.run_matches(
+                args.deck, stage, tested, matches, collect=collect,
+                policy_key=policy_key, force_sync_policy=force_sync_policy, **metadata,
+            )
+            return
         for wave in batched(matches, parallel_games):
             used = Counter()
             environments = []
@@ -394,7 +506,9 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
                     decks = decks[::-1]
                 slot = used[decks]
                 if slot == len(envs[decks]):
-                    envs[decks].append(battle_env(*decks))
+                    envs[decks].append(battle_env(
+                        *decks, reward_profile=reward_profile, obs_profile=obs_profile,
+                    ))
                 environments.append(envs[decks][slot])
                 used[decks] += 1
             results = play_wave(output, stage, tested, wave, environments, device,
@@ -405,19 +519,24 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
     previous_updates = resume_history(output, ppo_saved["metrics"]) if args.resume_ppo else []
 
     try:
+        if worker_pool is not None:
+            worker_pool.__enter__()
         final_update = start_update + args.ppo_updates
         if report_progress and args.ppo_updates:
             report_progress("ppo_start", done=start_update, total=final_update,
-                            resumed=args.resume_ppo, parallel_games=min(parallel_games, args.rollout_games))
+                            resumed=args.resume_ppo,
+                            parallel_games=min(parallel_games, args.rollout_games),
+                            rollout_workers=rollout_workers)
         for update in range(start_update, final_update):
             check_training_stop()
             began = perf_counter()
             games, chunks = [], []
-            # Keep the original seed and side for each pairing, but run the same rival
-            # together so its predictions can also use batches.
+            # PFSP sampling focuses more games on lower win-rate rivals while keeping exploration.
+            rival_names = [rival.name for rival in league]
+            sampled = pfsp.sample_indices(rival_names, args.rollout_games, rng)
             assignments = [
-                ((update + i) % len(league), (update + i) % 2, int(rng.integers(2**31)))
-                for i in range(args.rollout_games)
+                (index, (update + i) % 2, int(rng.integers(2**31)))
+                for i, index in enumerate(sampled)
             ]
             matches = [
                 Match(league[index], seat, seed, number)
@@ -428,22 +547,46 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
             if report_progress:
                 report_progress("ppo_match", update=update + 1, done=update, total=final_update,
                                 games=len(matches), parallel_games=concurrent)
+            done_games = 0
             for match, (game, rows) in play_matches("ppo", policy, matches, collect=True, update=update + 1):
                 games.append(game)
                 chunks.append(rows)
+                pfsp.record(match.rival.name, game["result"])
+                done_games += 1
                 if report_progress:
                     report_progress("ppo_game", update=update + 1, total=final_update,
-                                    done=match.number, games=args.rollout_games, rival=match.rival.name,
+                                    done=done_games, games=args.rollout_games, rival=match.rival.name,
                                     parallel_games=concurrent)
             del rows
             simulation_seconds = perf_counter() - began
+            sim_gph = len(games) / max(1e-6, simulation_seconds) * 3600.0
+            print(
+                f"[PPO {update + 1}/{final_update}] {len(games)} jogos simulados em {simulation_seconds:.1f}s "
+                f"({sim_gph:,.0f} j/h) — otimizando politica...",
+                flush=True,
+            )
             began = perf_counter()
             data = rollout_tensors(chunks, device)
-            divergence = optimize_ppo(
-                policy, reference, optimizer, data, args.batch_size, 3, args.kl_coef,
+            chunks.clear()
+            if update == 0 and not args.resume_ppo:
+                warmup_value_head(policy, data, args.batch_size, updates=5)
+            ref_runner = None
+            if isinstance(worker_pool, GpuBatchedRolloutPool):
+                worker_pool.publish_model("bc_ref", reference, force=False)
+                ref_runner = worker_pool._runners.get("bc_ref")
+            large_wave = device == "cpu" and len(data[3]) > 12_000
+            if large_wave:
+                data = stratified_ppo_subsample(data, max_samples=8192, rng=rng)
+            ppo_epochs = 1 if large_wave else 3
+            effective_kl = scheduled_kl_coef(args.kl_coef, update) if kl_decay else args.kl_coef
+            divergence, ppo_stats = optimize_ppo(
+                policy, reference, optimizer, data, args.batch_size, ppo_epochs, effective_kl,
+                kl_direction=kl_direction, return_stats=True, reference_runner=ref_runner,
             )
             del data
             metrics = {**summarize(games), "kl_bc_to_ppo": divergence,
+                       "ppo": ppo_stats, "reward_profile": reward_profile,
+                       "rollout_workers": rollout_workers,
                        "simulation_seconds": round(simulation_seconds, 3),
                        "optimization_seconds": round(perf_counter() - began, 3),
                        "rivals": dict(Counter(match.rival.name for match in matches)), "update": update + 1}
@@ -451,7 +594,10 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
             ppo_metrics.append(metrics)
             save_checkpoint(output / "league" / f"{update + 1:05d}.pt", policy, args.deck,
                             "ppo", metrics)
-            state = training_state(reference_hash, optimizer, rng, device, **extra_trainer)
+            state = training_state(
+                reference_hash, optimizer, rng, device,
+                pfsp_wr=dict(pfsp.ema_wr), **extra_trainer,
+            )
             save_checkpoint(output / "ppo.pt", policy, args.deck, "ppo", metrics, state)
             league.append(Rival(f"snapshot_{update + 1}", args.deck, frozen_policy(policy)))
             if report_progress:
@@ -474,7 +620,12 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
                         Match(rival, i % 2, 1_000_000 + args.seed + i // 2, i + 1)
                         for i in range(args.evaluate)
                     ]
-                    games = [game for _, game in play_matches("evaluation", tested, matches, model=label)]
+                    games = [
+                        game for _, game in play_matches(
+                            "evaluation", tested, matches, model=label,
+                            policy_key=f"eval:{label}", force_sync_policy=True,
+                        )
+                    ]
                     name = f"{label}_vs_{rival.name}"
                     evaluations[name] = summarize(games)
                     print(f"{name}: {evaluations[name]}", flush=True)
@@ -489,6 +640,8 @@ def run_selfplay(args, device, bc_path, output, report_progress=None):
             encoding="utf-8",
         )
     finally:
+        if worker_pool is not None:
+            worker_pool.close()
         for pool in envs.values():
             for env in pool:
                 env.close()

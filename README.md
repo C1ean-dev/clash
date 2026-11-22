@@ -117,3 +117,29 @@ O adaptador abaixo lê o endpoint `/api/frames` de uma sessão de captura do cr-
 O adaptador também lê exportações cronológicas de quadros em JSONL pela entrada padrão. O rastreador descarta os campos de elixir estimado e cartas vistas fornecidos pelo leitor e refaz a estimativa com os eventos confirmados. A vida de unidades sem barra legível usa o valor base da carta no simulador.
 
 O simulador fornece as jogadas públicas aceitas. O rastreador estima o elixir e a fila do rival com essas jogadas e o relógio de partida. Para verificar o contrato de observação e a recompensa de aquisição de alvo, execute `python -m unittest -v test_xbow_pipeline` no ambiente do projeto.
+
+## Visão YOLO e Ciclo Híbrido (Ao Vivo ↔ Sintético)
+
+### 1. Detector YOLO público, auto-coleta e treino sintético de visão
+O leitor de tela (`xbow_screen_vision.py`) e o treinador autônomo (`xbow_live_trainer.py`) suportam `--yolo-model auto` (prioriza `models/vision/custom_yolo.pt` → `models/vision/units_M_480x352.onnx` + `side.onnx` → fallback por barras de HP) com fusão híbrida de vida estimada e auto-coleta em `runs/vision_dataset/`.
+
+```powershell
+.\.venv\Scripts\python.exe xbow_vision_train.py download-public
+.\.venv\Scripts\python.exe xbow_vision_train.py status
+.\.venv\Scripts\python.exe xbow_vision_train.py cycle --synthetic-count 400 --epochs 15 --imgsz 480 --batch 8
+```
+
+### 2. Ciclo híbrido da política (Live AWR ↔ PPO Sintético com Gate A/B)
+`xbow_hybrid_loop.py` analisa as partidas gravadas em `runs/live_matches/` para priorizar no `RoyaleSim` os arquétipos onde a IA mais perdeu ao vivo, aplica AWR + PPO contra a liga de 6 arquétipos e só promove o novo `ppo_live.pt` após passar no teste A/B com as mesmas sementes.
+
+```powershell
+.\.venv\Scripts\python.exe xbow_hybrid_loop.py meta --deck xbow_30
+.\.venv\Scripts\python.exe xbow_hybrid_loop.py reinforce --deck xbow_30 --checkpoint runs/assistido-20261121-131255-c5e5e/xbow_30/ppo_live.pt
+.\.venv\Scripts\python.exe xbow_hybrid_loop.py daemon --deck xbow_30 --checkpoint runs/assistido-20261121-131255-c5e5e/xbow_30/ppo_live.pt --every-matches 5 --also-vision
+```
+
+Também é possível rodar tudo integrado no `xbow_live_trainer.py` (com hot-reload automático entre partidas):
+
+```powershell
+.\.venv\Scripts\python.exe xbow_live_trainer.py --deck xbow_30 --checkpoint runs/assistido-20261121-131255-c5e5e/xbow_30/ppo_live.pt --yolo-model auto --learn-every 5 --sim-reinforce-every 10 --vision-retrain-every 15
+```

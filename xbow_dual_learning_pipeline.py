@@ -8,15 +8,19 @@ from pathlib import Path
 
 import torch
 
-from xbow_environment import JOINT_REWARD_PROFILES, battle_env
+from xbow_environment import (
+    DEFAULT_OBS_PROFILE, JOINT_REWARD_PROFILES, OBS_PROFILES, RIVAL_DECKS, battle_env,
+    obs_profile_for_architecture,
+)
 from xbow_metrics import TrainingStopped, check_training_stop, training_journal
 from xbow_replays import DECKS, winning_replays
 from xbow_training import replay_validation, train_clone
 
 
 def main():
+    all_decks = tuple(DECKS) + tuple(RIVAL_DECKS)
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--deck", choices=DECKS, default="xbow_30")
+    parser.add_argument("--deck", choices=all_decks, default="xbow_30")
     parser.add_argument("--parquet-path", type=Path, help="Arquivo ou pasta de replays IL_Replay")
     parser.add_argument("--scan", action="store_true", help="Conta partidas vencedoras sem treinar")
     parser.add_argument("--matches", type=int, default=60, help="Limite de partidas reconstruidas")
@@ -37,13 +41,29 @@ def main():
     parser.add_argument("--continuous", action="store_true",
                         help="Treina os dois modelos até uma parada solicitada")
     parser.add_argument("--reward", choices=JOINT_REWARD_PROFILES,
-                        help="Recompensa do treino conjunto (padrão: potential)")
+                        help="Recompensa do PPO/self-play (padrão: potential)")
+    parser.add_argument("--obs-profile", choices=OBS_PROFILES, default=DEFAULT_OBS_PROFILE,
+                        help="Perfil de observacao para novo treino BC (padrao: v3)")
+    parser.add_argument("--include-casual", action="store_true",
+                        help="Inclui partidas friendly/clanMate na imitacao (padrao: filtra para competitivo)")
+    parser.add_argument("--no-mirror", action="store_true",
+                        help="Desativa espelhamento horizontal 2x na imitacao")
+    parser.add_argument("--early-stop-patience", type=int, default=4,
+                        help="Epocas sem melhora na validacao BC antes de parar (0 desativa)")
     parser.add_argument("--compare-rewards", type=Path, metavar="PASTA",
                         help="Compara legacy e potential a partir do mesmo checkpoint conjunto")
     parser.add_argument("--rollout-games", type=int, default=4)
-    parser.add_argument("--parallel-games", type=int, choices=range(1, 9),
-                        help="Partidas simultâneas (padrão: 8 no PPO em CPU com 4+ threads, 4 nos demais casos)")
-    parser.add_argument("--kl-coef", type=float, default=0.15)
+    parser.add_argument("--parallel-games", type=int, default=None,
+                        help="Partidas simultâneas (tabuleiros em paralelo)")
+    parser.add_argument("--rollout-workers", type=int, default=None,
+                        help="Processos paralelos de simulacao CPU (padrao: automatico; 1 desativa)")
+    parser.add_argument("--kl-coef", type=float, default=0.12)
+    parser.add_argument("--kl-direction", choices=("reverse", "forward"), default="reverse",
+                        help="Direcao da divergencia KL contra o BC (padrao: reverse)")
+    parser.add_argument("--no-kl-decay", action="store_true",
+                        help="Mantem kl-coef constante em vez de decair exponencialmente")
+    parser.add_argument("--rival-bc-checkpoint", type=Path,
+                        help="Checkpoint BC opcional para inicializar a rede adversaria no coevolve")
     parser.add_argument("--evaluate", type=int, default=0, metavar="GAMES")
     parser.add_argument("--evaluate-checkpoint", type=Path, help="Compara um checkpoint PPO salvo com o BC")
     parser.add_argument("--replay-eval", action="store_true",
@@ -53,7 +73,8 @@ def main():
         if args.parquet_path is None:
             parser.error("--scan requer --parquet-path")
         counts = Counter()
-        for _ in winning_replays(args.parquet_path, args.deck, counts):
+        for _ in winning_replays(args.parquet_path, args.deck, counts,
+                                 deck_cards=(DECKS | RIVAL_DECKS)[args.deck]):
             pass
         print(f"{args.deck}: {dict(counts)}")
         return
@@ -71,8 +92,10 @@ def main():
         parser.error("--coevolve requer --resume-ppo com o deck xbow_30")
     if args.continuous and (not args.coevolve or args.ppo_updates or args.evaluate or args.compare_rewards):
         parser.error("--continuous requer --coevolve e executa o treino sem limite de partidas")
-    if (args.reward or args.compare_rewards) and not args.coevolve:
-        parser.error("--reward e --compare-rewards requerem --coevolve")
+    if args.compare_rewards and not args.coevolve:
+        parser.error("--compare-rewards requer --coevolve")
+    if args.rival_bc_checkpoint and not args.coevolve:
+        parser.error("--rival-bc-checkpoint requer --coevolve")
     if args.compare_rewards:
         if args.reward or args.evaluate < 2 or args.evaluate % 2:
             parser.error("--compare-rewards requer --evaluate par a partir de 2 e roda os dois perfis")
@@ -86,8 +109,12 @@ def main():
     threads = 2 if args.threads is None else args.threads
     if min(args.matches - 1, args.epochs, args.batch_size, threads, args.rollout_games) < 1:
         parser.error("informe pelo menos 2 partidas e valores positivos para os demais limites")
-    if not math.isfinite(args.kl_coef) or min(args.ppo_updates, args.kl_coef, args.evaluate) < 0:
-        parser.error("PPO, KL e avaliacao devem ser nao negativos")
+    if args.parallel_games is not None and args.parallel_games < 1:
+        parser.error("parallel-games deve ser pelo menos 1")
+    if args.rollout_workers is not None and args.rollout_workers < 1:
+        parser.error("rollout-workers deve ser pelo menos 1")
+    if not math.isfinite(args.kl_coef) or min(args.ppo_updates, args.kl_coef, args.evaluate, args.early_stop_patience) < 0:
+        parser.error("PPO, KL, avaliacao e paciencia de parada devem ser nao negativos")
     torch.set_num_threads(threads)
     torch.manual_seed(args.seed)
     device = args.device if args.device != "auto" else ("cuda" if torch.cuda.is_available() else "cpu")
@@ -112,14 +139,19 @@ def run(args, device, output, bc_path, report):
     check_training_stop()
     if args.replay_eval:
         report("replay_validation")
-        env = battle_env(args.deck)
+        saved = torch.load(args.bc_checkpoint, map_location="cpu", weights_only=True)
+        arch_cfg = saved.get("arch_config") or {}
+        obs_profile = obs_profile_for_architecture(
+            saved.get("architecture", 1), arch_cfg.get("obs_profile"),
+        )
+        env = battle_env(args.deck, obs_profile=obs_profile)
         try:
             replay_validation(env, args, device, output)
         finally:
             env.close()
         return
     if args.parquet_path:
-        env = battle_env(args.deck)
+        env = battle_env(args.deck, obs_profile=args.obs_profile)
         try:
             train_clone(env, args, device, bc_path, report)
         finally:
